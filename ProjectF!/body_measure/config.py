@@ -1,21 +1,22 @@
-"""
-Configuration constants used across the project.
-Adjust values here to tune the system.
-"""
+"""Central configuration for the body-measurement application."""
 
-# MediaPipe models (update paths if needed)
-POSE_MODEL = "pose_landmarker_lite.task"
-HAND_MODEL = "hand_landmarker_lite.task"
+from pathlib import Path
 
-# Calibration
-REFERENCE_MARKER_CM = 5.0  # real‑world size of the ArUco marker in cm
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+POSE_MODEL = PROJECT_ROOT / "pose_landmarker_full.task"
+HAND_MODEL = PROJECT_ROOT / "hand_landmarker.task"
+
+DEFAULT_HEIGHT_CM = 170.0
+DEFAULT_MARKER_CM = 0.0  # 0 means use the height-based estimate.
+ARUCO_MARKER_ID = 0
 ARUCO_DICT = "DICT_4X4_50"
 
-# One Euro Filter parameters (tune as needed)
-ONE_EURO_MIN_CUTOFF = 1.0
-ONE_EURO_BETA = 0.0
-ONE_EURO_DERIV_CUTOFF = 1.0
-
-# UI settings
+CAMERA_INDEX = 0
+FRAME_WIDTH = 1280
+FRAME_HEIGHT = 720
 WINDOW_TITLE = "Precision Body Measurement"
 WINDOW_SIZE = (960, 540)
+
+VISIBILITY_THRESHOLD = 0.6
+REQUIRED_STABLE_SAMPLES = 45
+GESTURE_HOLD_SECONDS = 1.5

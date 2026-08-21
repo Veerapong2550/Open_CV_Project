@@ -1,34 +1,34 @@
-"""
-State machine for measurement workflow.
-Defines three states: WAITING, MEASURING, EXIT.
-Transitions are triggered by a peace‑sign gesture with a cooldown.
-"""
+"""Gesture-controlled measurement workflow."""
 
 from enum import Enum, auto
-import time
+
 
 class State(Enum):
     WAITING = auto()
     MEASURING = auto()
     EXIT = auto()
 
-class GestureStateMachine:
-    def __init__(self, cooldown: float = 1.0):
-        self.state = State.WAITING
-        self.last_transition = time.time()
-        self.cooldown = cooldown
 
-    def update(self, peace_sign: bool) -> State:
-        """Update the state based on the peace‑sign detection.
-        Returns the current state after possible transition.
-        """
-        now = time.time()
-        if now - self.last_transition < self.cooldown:
-            return self.state
-        if self.state == State.WAITING and peace_sign:
+class GestureStateMachine:
+    """A peace sign must be held continuously before a state transition."""
+
+    def __init__(self, hold_seconds: float):
+        self.state = State.WAITING
+        self.hold_seconds = hold_seconds
+        self._gesture_started: float | None = None
+
+    def update(self, peace_sign: bool, timestamp: float) -> tuple[State, float, bool]:
+        if not peace_sign:
+            self._gesture_started = None
+            return self.state, 0.0, False
+        if self._gesture_started is None:
+            self._gesture_started = timestamp
+        progress = min(1.0, (timestamp - self._gesture_started) / self.hold_seconds)
+        if progress < 1.0:
+            return self.state, progress, False
+        self._gesture_started = None
+        if self.state is State.WAITING:
             self.state = State.MEASURING
-            self.last_transition = now
-        elif self.state == State.MEASURING and peace_sign:
+        elif self.state is State.MEASURING:
             self.state = State.EXIT
-            self.last_transition = now
-        return self.state
+        return self.state, 1.0, True

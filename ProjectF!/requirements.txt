@@ -1,0 +1,7 @@
+# Runtime dependencies for the integrated body measurement application.
+mediapipe
+opencv-contrib-python
+numpy
+Pillow
+pandas
+openpyxl
