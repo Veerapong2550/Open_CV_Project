@@ -33,6 +33,7 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
         f"Shoulder width:  {measurement.get('shoulder_cm', 0.0):.1f} cm\n"
         f"Left shoulder:     {measurement.get('left_shoulder_cm', 0.0):.1f} cm\n"
         f"Right shoulder:   {measurement.get('right_shoulder_cm', 0.0):.1f} cm\n"
+        f"Left/right difference:  {measurement.get('shoulder_difference_cm', 0.0):.1f} cm\n"
         f"Input height:       {measurement.get('input_height_cm', 0.0):.1f} cm\n\n"
         f"Calibration:  {measurement.get('calibration', 'Not available')}\n"
         f"Position:       {measurement.get('quality', 'Not available')}\n"

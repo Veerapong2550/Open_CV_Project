@@ -65,6 +65,7 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
     shoulder_cm = math.dist(left, right) / scale
     left_cm = math.dist(left, neck) / scale
     right_cm = math.dist(right, neck) / scale
+    shoulder_difference_cm = abs(left_cm - right_cm)
     live_values = {
         "shoulder_cm": shoulder_cm,
         "left_shoulder_cm": left_cm,
@@ -85,6 +86,7 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
         "shoulder_cm": shoulder_cm,
         "left_shoulder_cm": left_cm,
         "right_shoulder_cm": right_cm,
+        "shoulder_difference_cm": shoulder_difference_cm,
         "samples_used": 1,
         "calibration": "ArUco marker" if marker_size_cm > 0 else "Height-based estimate",
         "quality": " • ".join(quality_notes) if quality_notes else "Good position",
