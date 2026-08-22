@@ -5,6 +5,7 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 POSE_MODEL = PROJECT_ROOT / "pose_landmarker_full.task"
 HAND_MODEL = PROJECT_ROOT / "hand_landmarker.task"
+CAPTURE_DIR = PROJECT_ROOT / "captures"
 
 DEFAULT_HEIGHT_CM = 170.0
 DEFAULT_MARKER_CM = 0.0  # 0 means use the height-based estimate.

@@ -12,7 +12,7 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
     """Show a modal result screen, returning to the camera when it is closed."""
     root = tk.Tk() if parent is None else tk.Toplevel(parent)
     root.title("Measurement Summary")
-    root.geometry("520x470")
+    root.geometry("700x560")
     root.resizable(False, False)
     root.configure(bg="#101418")
     if parent is not None:
@@ -27,19 +27,19 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
     tk.Label(panel, text=f"Measured at: {measurement['measured_at']}", font=("Segoe UI", 10),
              fg="#aebdca", bg="#1b232c").pack(anchor=tk.W, pady=(4, 22))
 
-    rows = (
-        ("Shoulder width", f"{measurement['shoulder_cm']:.1f} cm"),
-        ("Left shoulder length", f"{measurement['left_shoulder_cm']:.1f} cm"),
-        ("Right shoulder length", f"{measurement['right_shoulder_cm']:.1f} cm"),
-        ("Input height", f"{measurement['input_height_cm']:.1f} cm"),
-        ("Calibration", measurement["calibration"]),
-        ("Position feedback", measurement.get("quality", "")),
+    # A single multi-line label avoids geometry conflicts that could hide the
+    # value column in a small or high-DPI display.
+    summary_text = (
+        f"Shoulder width:  {measurement.get('shoulder_cm', 0.0):.1f} cm\n"
+        f"Left shoulder:     {measurement.get('left_shoulder_cm', 0.0):.1f} cm\n"
+        f"Right shoulder:   {measurement.get('right_shoulder_cm', 0.0):.1f} cm\n"
+        f"Input height:       {measurement.get('input_height_cm', 0.0):.1f} cm\n\n"
+        f"Calibration:  {measurement.get('calibration', 'Not available')}\n"
+        f"Position:       {measurement.get('quality', 'Not available')}\n"
+        f"Full-body photo:  {measurement.get('capture_file', 'Not saved')}"
     )
-    for label, value in rows:
-        row = tk.Frame(panel, bg="#1b232c")
-        row.pack(fill=tk.X, pady=4)
-        tk.Label(row, text=label, font=("Segoe UI", 11), fg="#c8d3dc", bg="#1b232c").pack(side=tk.LEFT)
-        tk.Label(row, text=value, font=("Segoe UI", 12, "bold"), fg="#55d6be", bg="#1b232c").pack(side=tk.RIGHT)
+    tk.Label(panel, text=summary_text, justify=tk.LEFT, anchor=tk.W,
+             font=("Consolas", 14, "bold"), fg="#55d6be", bg="#1b232c").pack(fill=tk.X, pady=(0, 8))
 
     close = tk.Button(panel, text="Measure again", command=root.destroy, font=("Segoe UI", 11, "bold"),
                       bg="#2c7be5", fg="white", activebackground="#1f64c0", relief=tk.FLAT,

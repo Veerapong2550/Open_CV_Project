@@ -9,6 +9,7 @@ import time
 import cv2
 
 from .calibration import get_pixel_scale
+from .capture import save_full_body_capture
 from .config import (CAMERA_INDEX, DEFAULT_HEIGHT_CM, DEFAULT_MARKER_CM, FRAME_HEIGHT,
                      FRAME_WIDTH, GESTURE_HOLD_SECONDS,
                      VISIBILITY_THRESHOLD, WINDOW_SIZE, WINDOW_TITLE)
@@ -17,6 +18,15 @@ from .ui import MeasurementUI, show_measurement_summary
 from .utils import (PointSmoother, draw_hand_landmarks, draw_thai_text,
                     draw_pose_landmarks, is_peace_sign, shoulder_center)
 from .vision import VisionEngine
+
+
+def _has_full_body(pose_result) -> bool:
+    """Return whether the shoulders and ankles are reliably visible."""
+    if not pose_result.pose_landmarks:
+        return False
+    landmarks = pose_result.pose_landmarks[0]
+    required = (landmarks[0], landmarks[11], landmarks[12], landmarks[27], landmarks[28])
+    return all(getattr(point, "visibility", 1.0) > VISIBILITY_THRESHOLD for point in required)
 
 
 def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, marker_size_cm,
@@ -29,7 +39,7 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
     landmarks = pose_result.pose_landmarks[0]
     left_shoulder, right_shoulder, nose = landmarks[11], landmarks[12], landmarks[0]
     left_ankle, right_ankle = landmarks[27], landmarks[28]
-    required = (left_shoulder, right_shoulder, left_ankle, right_ankle)
+    required = (nose, left_shoulder, right_shoulder, left_ankle, right_ankle)
     if not all(getattr(point, "visibility", 1.0) > VISIBILITY_THRESHOLD for point in required):
         return "Keep your full body visible", None, None
 
@@ -101,6 +111,8 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
     vision = None
     measurement = None
     last_measurement = None
+    full_body_was_visible = False
+    last_capture_path = None
     try:
         ui = MeasurementUI(WINDOW_TITLE, WINDOW_SIZE)
         vision = VisionEngine()
@@ -124,6 +136,10 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                 # Show live feedback before the peace-sign workflow starts so
                 # the user can immediately tell whether the full body is seen.
                 draw_pose_landmarks(frame, pose_result.pose_landmarks[0])
+            full_body_visible = _has_full_body(pose_result)
+            if full_body_visible and not full_body_was_visible:
+                last_capture_path = save_full_body_capture(frame)
+            full_body_was_visible = full_body_visible
             peace = bool(hand_result.hand_landmarks and is_peace_sign(hand_result.hand_landmarks[0]))
             if hand_result.hand_landmarks:
                 draw_hand_landmarks(frame, hand_result.hand_landmarks[0])
@@ -147,6 +163,8 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                     draw_thai_text(frame, f"Left / right: {live_values['left_shoulder_cm']:.1f} / {live_values['right_shoulder_cm']:.1f} cm", (30, 105), 22, (0, 255, 255))
                 if new_measurement:
                     measurement = new_measurement
+                    if last_capture_path is not None:
+                        measurement["capture_file"] = last_capture_path.name
                     last_measurement = new_measurement
                     # Show the result for every completed cycle, then return
                     # to the live camera for another measurement.
@@ -154,6 +172,7 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                     smoother.clear()
                     measurement = None
                     state_machine.reset()
+                    full_body_was_visible = False
                     continue
                 if measurement:
                     draw_thai_text(frame, f"Shoulder width: {measurement['shoulder_cm']:.1f} cm", (30, 70), 28, (0, 255, 0))
