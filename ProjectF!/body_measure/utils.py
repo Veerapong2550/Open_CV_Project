@@ -94,6 +94,17 @@ HAND_CONNECTIONS = ((0, 1), (0, 5), (5, 9), (9, 13), (13, 17), (0, 17),
                     (9, 10), (10, 11), (11, 12), (13, 14), (14, 15), (15, 16),
                     (17, 18), (18, 19), (19, 20))
 
+# MediaPipe Pose's 33 landmark topology.  Keeping this locally avoids relying
+# on private drawing helpers and makes the camera feedback visible at all
+# times, not only once a measurement becomes valid.
+POSE_CONNECTIONS = (
+    (0, 1), (1, 2), (2, 3), (3, 7), (0, 4), (4, 5), (5, 6), (6, 8),
+    (9, 10), (11, 12), (11, 13), (13, 15), (15, 17), (15, 19), (15, 21),
+    (17, 19), (12, 14), (14, 16), (16, 18), (16, 20), (16, 22), (18, 20),
+    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26), (25, 27), (26, 28),
+    (27, 29), (28, 30), (29, 31), (30, 32), (27, 31), (28, 32),
+)
+
 
 def is_peace_sign(landmarks: Iterable) -> bool:
     points = list(landmarks)
@@ -108,6 +119,20 @@ def draw_hand_landmarks(frame: np.ndarray, landmarks: Iterable) -> None:
         cv2.line(frame, points[start], points[end], (0, 200, 0), 2, cv2.LINE_AA)
     for point in points:
         cv2.circle(frame, point, 4, (0, 0, 255), -1, cv2.LINE_AA)
+
+
+def draw_pose_landmarks(frame: np.ndarray, landmarks: Iterable, min_visibility: float = 0.25) -> None:
+    """Overlay the detected pose, including when the app is waiting to start."""
+    height, width = frame.shape[:2]
+    points = list(landmarks)
+    visible = [getattr(point, "visibility", 1.0) >= min_visibility for point in points]
+    pixels = [(int(point.x * width), int(point.y * height)) for point in points]
+    for start, end in POSE_CONNECTIONS:
+        if visible[start] and visible[end]:
+            cv2.line(frame, pixels[start], pixels[end], (255, 180, 0), 2, cv2.LINE_AA)
+    for point, is_visible in zip(pixels, visible):
+        if is_visible:
+            cv2.circle(frame, point, 3, (0, 220, 255), -1, cv2.LINE_AA)
 
 
 def shoulder_center(left: tuple[float, float], right: tuple[float, float],

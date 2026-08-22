@@ -21,9 +21,12 @@ class VisionEngine:
         self.pose = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
             base_options=base_options(model_asset_path=str(pose_model)),
             running_mode=vision.RunningMode.VIDEO,
-            min_pose_detection_confidence=0.6,
-            min_pose_presence_confidence=0.6,
-            min_tracking_confidence=0.6,
+            # A person occupying the full camera frame has smaller features
+            # than a close-up.  These values still reject weak detections, but
+            # avoid hiding a valid full-body pose before tracking can start.
+            min_pose_detection_confidence=0.45,
+            min_pose_presence_confidence=0.45,
+            min_tracking_confidence=0.45,
         ))
         self.hand = vision.HandLandmarker.create_from_options(vision.HandLandmarkerOptions(
             base_options=base_options(model_asset_path=str(hand_model)),

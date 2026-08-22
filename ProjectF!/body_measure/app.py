@@ -13,19 +13,19 @@ from .config import (CAMERA_INDEX, DEFAULT_HEIGHT_CM, DEFAULT_MARKER_CM, FRAME_H
                      FRAME_WIDTH, GESTURE_HOLD_SECONDS, REQUIRED_STABLE_SAMPLES,
                      VISIBILITY_THRESHOLD, WINDOW_SIZE, WINDOW_TITLE)
 from .state_machine import GestureStateMachine, State
-from .ui import MeasurementUI
+from .ui import MeasurementUI, show_measurement_summary
 from .utils import (PointSmoother, StableMeasurement, draw_hand_landmarks, draw_thai_text,
-                    is_peace_sign, shoulder_center)
+                    draw_pose_landmarks, is_peace_sign, shoulder_center)
 from .vision import VisionEngine
 
 
 def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, marker_size_cm,
                              marker_scale, smoother, samples):
-    """Analyse one frame and return a status and any new stable measurement."""
+    """Analyse one frame and return status, a stable result, and live values."""
     height, width = frame.shape[:2]
     if not pose_result.pose_landmarks:
         samples.clear()
-        return "Keep your full body visible", None
+        return "Keep your full body visible", None, None
 
     landmarks = pose_result.pose_landmarks[0]
     left_shoulder, right_shoulder, nose = landmarks[11], landmarks[12], landmarks[0]
@@ -33,7 +33,7 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
     required = (left_shoulder, right_shoulder, left_ankle, right_ankle)
     if not all(getattr(point, "visibility", 1.0) > VISIBILITY_THRESHOLD for point in required):
         samples.clear()
-        return "Keep your full body visible", None
+        return "Keep your full body visible", None, None
 
     left = smoother.update("left_shoulder", timestamp, left_shoulder.x * width, left_shoulder.y * height)
     right = smoother.update("right_shoulder", timestamp, right_shoulder.x * width, right_shoulder.y * height)
@@ -43,35 +43,42 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
                            (left_ankle.y + right_ankle.y) * height / 2)
     neck = shoulder_center(left, right, nose_xy, base)
     shoulder_angle = abs(math.degrees(math.atan2(right[1] - left[1], right[0] - left[0])))
-    if abs(neck[0] - width / 2) > width * 0.10:
-        samples.clear()
-        return "Move to the centre line", None
-    if shoulder_angle > 5.0:
-        samples.clear()
-        return "Keep shoulders level", None
 
     scale = marker_scale
     if scale is None and marker_size_cm > 0:
         samples.clear()
-        return "Show ArUco ID 0 beside your shoulders", None
+        return "Show ArUco ID 0 beside your shoulders", None, None
     if scale is None:
         # This fallback estimates scale from a known user height, so it remains
         # sensitive to perspective and should not be presented as calibration.
         scale = math.dist(nose_xy, base) * 1.06 / user_height_cm if user_height_cm > 0 else None
     if scale is None or scale <= 0:
         samples.clear()
-        return "Unable to determine scale", None
+        return "Unable to determine scale", None, None
 
     shoulder_cm = math.dist(left, right) / scale
     left_cm = math.dist(left, neck) / scale
     right_cm = math.dist(right, neck) / scale
+    live_values = {
+        "shoulder_cm": shoulder_cm,
+        "left_shoulder_cm": left_cm,
+        "right_shoulder_cm": right_cm,
+    }
+    if abs(neck[0] - width / 2) > width * 0.10:
+        samples.clear()
+        return "Move to the centre line", None, live_values
+    if shoulder_angle > 5.0:
+        samples.clear()
+        return "Keep shoulders level", None, live_values
+
     samples.add(shoulder_cm, left_cm, right_cm)
     for point, color in ((left, (0, 255, 0)), (right, (0, 255, 0)), (neck, (0, 255, 255))):
         cv2.circle(frame, (int(point[0]), int(point[1])), 7, color, -1, cv2.LINE_AA)
     cv2.line(frame, tuple(map(int, left)), tuple(map(int, right)), (255, 0, 0), 3, cv2.LINE_AA)
     result = samples.result()
     if result is None:
-        return f"Hold still — collecting samples ({len(samples.shoulders)}/{samples.required_samples})", None
+        return (f"Hold still — collecting samples ({len(samples.shoulders)}/{samples.required_samples})",
+                None, live_values)
     return "Measurement complete", {
         "measured_at": datetime.now().isoformat(timespec="seconds"),
         "input_height_cm": user_height_cm,
@@ -80,7 +87,7 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
         "right_shoulder_cm": result[2],
         "samples_used": len(samples.shoulders),
         "calibration": "ArUco marker" if marker_size_cm > 0 else "Height-based estimate",
-    }
+    }, live_values
 
 
 def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAULT_MARKER_CM,
@@ -102,6 +109,7 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
     ui = None
     vision = None
     measurement = None
+    last_measurement = None
     try:
         ui = MeasurementUI(WINDOW_TITLE, WINDOW_SIZE)
         vision = VisionEngine()
@@ -122,6 +130,10 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                 cv2.polylines(frame, [marker_corners], True, (0, 255, 255), 2, cv2.LINE_AA)
             timestamp = time.monotonic()
             pose_result, hand_result = vision.process(frame, int(timestamp * 1000))
+            if pose_result.pose_landmarks:
+                # Show live feedback before the peace-sign workflow starts so
+                # the user can immediately tell whether the full body is seen.
+                draw_pose_landmarks(frame, pose_result.pose_landmarks[0])
             peace = bool(hand_result.hand_landmarks and is_peace_sign(hand_result.hand_landmarks[0]))
             if hand_result.hand_landmarks:
                 draw_hand_landmarks(frame, hand_result.hand_landmarks[0])
@@ -134,15 +146,27 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
             if state is State.EXIT:
                 break
             if state is State.WAITING:
-                status = "Hold a peace sign to begin"
+                status = "Hold a peace sign to begin" if pose_result.pose_landmarks else "No body detected — step back and improve lighting"
                 if peace:
                     status += f" ({progress * GESTURE_HOLD_SECONDS:.1f}/{GESTURE_HOLD_SECONDS:.1f}s)"
             else:
-                status, new_measurement = _quality_and_measurement(
+                status, new_measurement, live_values = _quality_and_measurement(
                     pose_result, frame, timestamp, user_height_cm, marker_size_cm, marker_scale,
                     smoother, samples)
+                if live_values:
+                    draw_thai_text(frame, f"Live shoulder width: {live_values['shoulder_cm']:.1f} cm", (30, 70), 26, (0, 255, 255))
+                    draw_thai_text(frame, f"Left / right: {live_values['left_shoulder_cm']:.1f} / {live_values['right_shoulder_cm']:.1f} cm", (30, 105), 22, (0, 255, 255))
                 if new_measurement:
                     measurement = new_measurement
+                    last_measurement = new_measurement
+                    # Show the result for every completed cycle, then return
+                    # to the live camera for another measurement.
+                    show_measurement_summary(measurement, parent=ui.root)
+                    smoother.clear()
+                    samples.clear()
+                    measurement = None
+                    state_machine.reset()
+                    continue
                 if measurement:
                     draw_thai_text(frame, f"Shoulder width: {measurement['shoulder_cm']:.1f} cm", (30, 70), 28, (0, 255, 0))
             draw_thai_text(frame, status, (30, 30), 24, (255, 255, 255))
@@ -153,7 +177,7 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
             vision.close()
         if ui is not None:
             ui.destroy()
-    return measurement
+    return last_measurement
 
 
 if __name__ == "__main__":
