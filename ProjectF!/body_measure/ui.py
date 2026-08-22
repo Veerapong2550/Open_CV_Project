@@ -12,7 +12,7 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
     """Show a modal result screen, returning to the camera when it is closed."""
     root = tk.Tk() if parent is None else tk.Toplevel(parent)
     root.title("Measurement Summary")
-    root.geometry("520x430")
+    root.geometry("520x470")
     root.resizable(False, False)
     root.configure(bg="#101418")
     if parent is not None:
@@ -31,7 +31,9 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
         ("Shoulder width", f"{measurement['shoulder_cm']:.1f} cm"),
         ("Left shoulder length", f"{measurement['left_shoulder_cm']:.1f} cm"),
         ("Right shoulder length", f"{measurement['right_shoulder_cm']:.1f} cm"),
+        ("Input height", f"{measurement['input_height_cm']:.1f} cm"),
         ("Calibration", measurement["calibration"]),
+        ("Position feedback", measurement.get("quality", "")),
     )
     for label, value in rows:
         row = tk.Frame(panel, bg="#1b232c")

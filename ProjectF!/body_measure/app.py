@@ -10,21 +10,20 @@ import cv2
 
 from .calibration import get_pixel_scale
 from .config import (CAMERA_INDEX, DEFAULT_HEIGHT_CM, DEFAULT_MARKER_CM, FRAME_HEIGHT,
-                     FRAME_WIDTH, GESTURE_HOLD_SECONDS, REQUIRED_STABLE_SAMPLES,
+                     FRAME_WIDTH, GESTURE_HOLD_SECONDS,
                      VISIBILITY_THRESHOLD, WINDOW_SIZE, WINDOW_TITLE)
 from .state_machine import GestureStateMachine, State
 from .ui import MeasurementUI, show_measurement_summary
-from .utils import (PointSmoother, StableMeasurement, draw_hand_landmarks, draw_thai_text,
+from .utils import (PointSmoother, draw_hand_landmarks, draw_thai_text,
                     draw_pose_landmarks, is_peace_sign, shoulder_center)
 from .vision import VisionEngine
 
 
 def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, marker_size_cm,
-                             marker_scale, smoother, samples):
-    """Analyse one frame and return status, a stable result, and live values."""
+                             marker_scale, smoother):
+    """Analyse one frame and return status, an immediate result, and live values."""
     height, width = frame.shape[:2]
     if not pose_result.pose_landmarks:
-        samples.clear()
         return "Keep your full body visible", None, None
 
     landmarks = pose_result.pose_landmarks[0]
@@ -32,7 +31,6 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
     left_ankle, right_ankle = landmarks[27], landmarks[28]
     required = (left_shoulder, right_shoulder, left_ankle, right_ankle)
     if not all(getattr(point, "visibility", 1.0) > VISIBILITY_THRESHOLD for point in required):
-        samples.clear()
         return "Keep your full body visible", None, None
 
     left = smoother.update("left_shoulder", timestamp, left_shoulder.x * width, left_shoulder.y * height)
@@ -46,14 +44,12 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
 
     scale = marker_scale
     if scale is None and marker_size_cm > 0:
-        samples.clear()
         return "Show ArUco ID 0 beside your shoulders", None, None
     if scale is None:
         # This fallback estimates scale from a known user height, so it remains
         # sensitive to perspective and should not be presented as calibration.
         scale = math.dist(nose_xy, base) * 1.06 / user_height_cm if user_height_cm > 0 else None
     if scale is None or scale <= 0:
-        samples.clear()
         return "Unable to determine scale", None, None
 
     shoulder_cm = math.dist(left, right) / scale
@@ -64,35 +60,30 @@ def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, mark
         "left_shoulder_cm": left_cm,
         "right_shoulder_cm": right_cm,
     }
+    quality_notes = []
     if abs(neck[0] - width / 2) > width * 0.10:
-        samples.clear()
-        return "Move to the centre line", None, live_values
+        quality_notes.append("Move to centre")
     if shoulder_angle > 5.0:
-        samples.clear()
-        return "Keep shoulders level", None, live_values
+        quality_notes.append("Level shoulders")
 
-    samples.add(shoulder_cm, left_cm, right_cm)
     for point, color in ((left, (0, 255, 0)), (right, (0, 255, 0)), (neck, (0, 255, 255))):
         cv2.circle(frame, (int(point[0]), int(point[1])), 7, color, -1, cv2.LINE_AA)
     cv2.line(frame, tuple(map(int, left)), tuple(map(int, right)), (255, 0, 0), 3, cv2.LINE_AA)
-    result = samples.result()
-    if result is None:
-        return (f"Hold still — collecting samples ({len(samples.shoulders)}/{samples.required_samples})",
-                None, live_values)
     return "Measurement complete", {
         "measured_at": datetime.now().isoformat(timespec="seconds"),
         "input_height_cm": user_height_cm,
-        "shoulder_cm": result[0],
-        "left_shoulder_cm": result[1],
-        "right_shoulder_cm": result[2],
-        "samples_used": len(samples.shoulders),
+        "shoulder_cm": shoulder_cm,
+        "left_shoulder_cm": left_cm,
+        "right_shoulder_cm": right_cm,
+        "samples_used": 1,
         "calibration": "ArUco marker" if marker_size_cm > 0 else "Height-based estimate",
+        "quality": " • ".join(quality_notes) if quality_notes else "Good position",
     }, live_values
 
 
 def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAULT_MARKER_CM,
         video_source: int = CAMERA_INDEX):
-    """Run the integrated application and return its last stable measurement.
+    """Run the integrated application and return its last completed measurement.
 
     A peace sign held for 1.5 seconds starts the measurement; repeat it to exit.
     Passing a positive ``marker_size_cm`` enables true ArUco calibration (ID 0).
@@ -115,7 +106,6 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
         vision = VisionEngine()
         state_machine = GestureStateMachine(GESTURE_HOLD_SECONDS)
         smoother = PointSmoother()
-        samples = StableMeasurement(REQUIRED_STABLE_SAMPLES)
         while ui.is_open:
             ok, camera_frame = cap.read()
             if not ok:
@@ -141,7 +131,6 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
             state, progress, transitioned = state_machine.update(peace, timestamp)
             if transitioned and state is State.MEASURING:
                 smoother.clear()
-                samples.clear()
                 measurement = None
             if state is State.EXIT:
                 break
@@ -152,7 +141,7 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
             else:
                 status, new_measurement, live_values = _quality_and_measurement(
                     pose_result, frame, timestamp, user_height_cm, marker_size_cm, marker_scale,
-                    smoother, samples)
+                    smoother)
                 if live_values:
                     draw_thai_text(frame, f"Live shoulder width: {live_values['shoulder_cm']:.1f} cm", (30, 70), 26, (0, 255, 255))
                     draw_thai_text(frame, f"Left / right: {live_values['left_shoulder_cm']:.1f} / {live_values['right_shoulder_cm']:.1f} cm", (30, 105), 22, (0, 255, 255))
@@ -163,7 +152,6 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                     # to the live camera for another measurement.
                     show_measurement_summary(measurement, parent=ui.root)
                     smoother.clear()
-                    samples.clear()
                     measurement = None
                     state_machine.reset()
                     continue
