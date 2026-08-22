@@ -49,6 +49,8 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
         root.mainloop()
     else:
         root.update_idletasks()
+        # Make the result screen unmissable even when the live-camera window
+        # was the active foreground window.
         root.lift()
         root.focus_force()
         parent.wait_window(root)

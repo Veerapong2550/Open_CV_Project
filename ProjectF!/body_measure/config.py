@@ -18,5 +18,7 @@ WINDOW_TITLE = "Precision Body Measurement"
 WINDOW_SIZE = (960, 540)
 
 VISIBILITY_THRESHOLD = 0.6
-REQUIRED_STABLE_SAMPLES = 45
+# Complete immediately on the first valid pose.  This prioritizes instant
+# feedback; the displayed value can vary more than a multi-frame median.
+REQUIRED_STABLE_SAMPLES = 1
 GESTURE_HOLD_SECONDS = 1.5
