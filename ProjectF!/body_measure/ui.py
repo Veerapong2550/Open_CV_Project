@@ -279,9 +279,14 @@ def _build_posture_summary(panel: tk.Misc, measurement: dict, posture: dict) -> 
     footer.pack(fill=tk.X, pady=(14, 0))
     tk.Label(footer, text=f"การปรับเทียบ: {measurement.get('calibration', 'ไม่มี')}",
              font=("Tahoma", 9), fg=MUTED, bg=PANEL).pack(anchor=tk.W)
-    if measurement.get("capture_file"):
-        tk.Label(footer, text=f"ภาพอ้างอิง: {measurement['capture_file']}", font=("Tahoma", 9),
-                 fg=MUTED, bg=PANEL).pack(anchor=tk.W, pady=(2, 0))
+    front_capture = measurement.get("front_capture_file")
+    side_capture = measurement.get("side_capture_file", measurement.get("capture_file"))
+    if front_capture:
+        tk.Label(footer, text=f"ภาพที่บันทึกเมื่อวัดไหล่หน้าตรง: {front_capture}",
+                 font=("Tahoma", 9), fg=MUTED, bg=PANEL).pack(anchor=tk.W, pady=(2, 0))
+    if side_capture:
+        tk.Label(footer, text=f"ภาพที่บันทึกเมื่อวัดท่าด้านข้าง: {side_capture}",
+                 font=("Tahoma", 9), fg=MUTED, bg=PANEL).pack(anchor=tk.W, pady=(2, 0))
     tk.Label(footer, text=("ผลนี้ใช้คัดกรองแนวการจัดท่าจากกล้อง ไม่ใช่การวินิจฉัยโรค "
                            "หากมีปวด ชา อ่อนแรง หรือกังวลกับผล ควรปรึกษาแพทย์/นักกายภาพบำบัด"),
              font=("Tahoma", 8), fg="#7f92a3", bg=PANEL, wraplength=CONTENT_WRAP,

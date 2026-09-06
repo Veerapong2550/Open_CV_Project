@@ -34,14 +34,14 @@ class MeasurementPhase(Enum):
 
 
 def _has_full_body(pose_result) -> bool:
-    """Return whether enough of the body is present to save a useful capture."""
+    """Return whether every landmark required for an audit capture is clear."""
     if not pose_result.pose_landmarks:
         return False
     landmarks = pose_result.pose_landmarks[0]
     required = (0, 11, 12, 23, 24, 27, 28)
     if len(landmarks) <= max(required):
         return False
-    return sum(landmarks[index].visibility >= VISIBILITY_THRESHOLD for index in required) >= 6
+    return all(landmarks[index].visibility >= VISIBILITY_THRESHOLD for index in required)
 
 
 def _minimum_body_height(frame_height: int) -> float:
@@ -95,6 +95,9 @@ def _quality_and_shoulder_measurement(pose_result, frame, marker_size_cm: float,
     if metrics is None:
         samples.clear()
         return reason, None, None
+    if not _has_full_body(pose_result):
+        samples.clear()
+        return "ให้เห็นศีรษะ ไหล่ สะโพก และข้อเท้าครบก่อนบันทึกภาพไหล่", None, None
     if metrics["body_height_px"] < _minimum_body_height(height):
         samples.clear()
         return "เห็นร่างกายเล็กเกินไปสำหรับเปรียบเทียบไหล่ — ขยับเข้าใกล้เล็กน้อย", None, None
@@ -143,6 +146,9 @@ def _quality_and_posture_measurement(pose_result, frame, user_height_cm: float, 
     if metrics is None:
         samples.clear()
         return reason, None, None
+    if not _has_full_body(pose_result):
+        samples.clear()
+        return "ให้เห็นศีรษะ ไหล่ สะโพก และข้อเท้าครบก่อนบันทึกภาพท่าทาง", None, None
     if metrics["body_height_px"] < _minimum_body_height(height):
         samples.clear()
         minimum = int(_minimum_body_height(height))
@@ -227,8 +233,6 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
     ui = None
     vision = None
     last_measurement = None
-    full_body_was_visible = False
-    last_capture_path = None
     try:
         ui = MeasurementUI(WINDOW_TITLE, WINDOW_SIZE)
         vision = VisionEngine()
@@ -237,6 +241,7 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
         posture_samples = PostureSampleBuffer(POSTURE_STABLE_SAMPLES)
         phase = MeasurementPhase.FRONT_SHOULDERS
         shoulder_summary = None
+        front_capture_path = None
         while ui.is_open:
             ok, camera_frame = cap.read()
             if not ok:
@@ -254,10 +259,6 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
 
             if pose_result.pose_landmarks:
                 draw_pose_landmarks(frame, pose_result.pose_landmarks[0])
-            full_body_visible = _has_full_body(pose_result)
-            if full_body_visible and not full_body_was_visible:
-                last_capture_path = save_full_body_capture(frame)
-            full_body_was_visible = full_body_visible
 
             peace = bool(hand_result.hand_landmarks and is_peace_sign(hand_result.hand_landmarks[0]))
             if hand_result.hand_landmarks:
@@ -269,6 +270,7 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                 posture_samples.clear()
                 shoulder_summary = None
                 phase = MeasurementPhase.FRONT_SHOULDERS
+                front_capture_path = None
             if state is State.EXIT:
                 break
             if state is State.WAITING:
@@ -283,6 +285,13 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                         pose_result, frame, marker_size_cm, marker_scale, shoulder_samples)
                     new_measurement = None
                     if completed_shoulders is not None:
+                        # This point follows full-body, front-view, resolution,
+                        # and multi-frame stability checks, so it is an auditable
+                        # image of the actual shoulder result rather than an
+                        # arbitrary first frame in which a person was detected.
+                        front_capture_path = save_full_body_capture(frame, "front_shoulders")
+                        if front_capture_path is not None:
+                            completed_shoulders["capture_file"] = front_capture_path.name
                         shoulder_summary = completed_shoulders
                         posture_samples.clear()
                         phase = MeasurementPhase.SIDE_POSTURE
@@ -308,8 +317,17 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                     else:
                         draw_thai_text(frame, f"ภาพหน้า: ไหล่เอียง {live_values['shoulder_tilt_deg']:.1f}° | สะโพกเอียง {live_values['hip_tilt_deg']:.1f}°", (30, 70), 21, (0, 255, 255))
                 if new_measurement:
-                    if last_capture_path is not None:
-                        new_measurement["capture_file"] = last_capture_path.name
+                    # The final side frame has likewise passed every posture
+                    # quality and stability gate.  Save it before presenting
+                    # the numeric summary so the result has both view records.
+                    side_capture_path = save_full_body_capture(frame, "side_posture")
+                    if front_capture_path is not None:
+                        new_measurement["front_capture_file"] = front_capture_path.name
+                    if side_capture_path is not None:
+                        new_measurement["side_capture_file"] = side_capture_path.name
+                        # Preserve the legacy single-image field as the final
+                        # (side-view) image used for posture screening.
+                        new_measurement["capture_file"] = side_capture_path.name
                     last_measurement = new_measurement
                     show_measurement_summary(new_measurement, parent=ui.root)
                     shoulder_samples.clear()
@@ -317,7 +335,7 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                     shoulder_summary = None
                     phase = MeasurementPhase.FRONT_SHOULDERS
                     state_machine.reset()
-                    full_body_was_visible = False
+                    front_capture_path = None
                     continue
             draw_thai_text(frame, status, (30, 30), 22, (255, 255, 255))
             ui.show_frame(frame)
