@@ -152,6 +152,19 @@ def draw_posture_guides(frame: np.ndarray, points: dict[str, tuple[float, float]
         cv2.circle(frame, point, 6, color, -1, cv2.LINE_AA)
 
 
+def draw_shoulder_measurement_guides(frame: np.ndarray,
+                                     points: dict[str, tuple[float, float]]) -> None:
+    """Overlay front-view torso-midline to left/right shoulder measurements."""
+    required = ("left_shoulder", "torso_midline_proxy", "right_shoulder")
+    if not all(name in points for name in required):
+        return
+    left, midline, right = (tuple(map(int, points[name])) for name in required)
+    cv2.line(frame, left, midline, (0, 255, 0), 3, cv2.LINE_AA)
+    cv2.line(frame, midline, right, (0, 200, 255), 3, cv2.LINE_AA)
+    for point, color in ((left, (0, 255, 0)), (midline, (255, 255, 255)), (right, (0, 200, 255))):
+        cv2.circle(frame, point, 7, color, -1, cv2.LINE_AA)
+
+
 def shoulder_center(left: tuple[float, float], right: tuple[float, float],
                     nose: tuple[float, float], base: tuple[float, float]) -> tuple[float, float]:
     lx, ly = left

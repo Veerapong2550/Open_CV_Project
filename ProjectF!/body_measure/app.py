@@ -1,8 +1,9 @@
-"""Camera application for a distance-tolerant side-profile posture screen."""
+"""Two-view camera measurement: front shoulders plus side-profile posture."""
 
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum, auto
 import time
 
 import cv2
@@ -11,15 +12,25 @@ from .calibration import get_pixel_scale
 from .capture import save_full_body_capture
 from .config import (CAMERA_INDEX, DEFAULT_HEIGHT_CM, DEFAULT_MARKER_CM, FRAME_HEIGHT,
                      FRAME_WIDTH, GESTURE_HOLD_SECONDS, MIN_ANALYSIS_BODY_HEIGHT_PX,
-                     MIN_ANALYSIS_BODY_HEIGHT_RATIO, POSTURE_STABLE_SAMPLES,
-                     POSTURE_VISIBILITY_THRESHOLD, SIDE_VIEW_MAX_WIDTH_TO_TORSO,
+                     MIN_ANALYSIS_BODY_HEIGHT_RATIO, MIN_FRONT_SHOULDER_SPAN_PX,
+                     POSTURE_STABLE_SAMPLES, POSTURE_VISIBILITY_THRESHOLD,
+                     FRONT_SHOULDER_VISIBILITY_THRESHOLD, FRONT_VIEW_MIN_WIDTH_TO_TORSO,
+                     SHOULDER_STABLE_SAMPLES, SIDE_VIEW_MAX_WIDTH_TO_TORSO,
                      VISIBILITY_THRESHOLD, WINDOW_SIZE, WINDOW_TITLE)
-from .posture import PostureSampleBuffer, analyse_posture_frame
+from .posture import (PostureSampleBuffer, ShoulderSampleBuffer, analyse_front_shoulder_frame,
+                      analyse_posture_frame)
 from .state_machine import GestureStateMachine, State
 from .ui import MeasurementUI, show_measurement_summary
 from .utils import (draw_hand_landmarks, draw_pose_landmarks, draw_posture_guides,
-                    draw_thai_text, is_peace_sign)
+                    draw_shoulder_measurement_guides, draw_thai_text, is_peace_sign)
 from .vision import VisionEngine
+
+
+class MeasurementPhase(Enum):
+    """The two camera views required for reliable combined reporting."""
+
+    FRONT_SHOULDERS = auto()
+    SIDE_POSTURE = auto()
 
 
 def _has_full_body(pose_result) -> bool:
@@ -52,9 +63,73 @@ def _add_absolute_estimates(summary: dict) -> None:
     summary["shoulder_hip_offset_cm"] = summary["shoulder_hip_offset_ratio"] * torso_cm
 
 
-def _quality_and_measurement(pose_result, frame, user_height_cm: float, marker_size_cm: float,
-                             marker_scale: float | None, samples: PostureSampleBuffer):
-    """Analyse one side-view frame and return status, a result, and live values."""
+def _add_absolute_shoulder_estimates(summary: dict) -> None:
+    """Add cm values for front shoulder comparison only with ArUco calibration."""
+    pixels_per_cm = summary.get("pixels_per_cm", 0.0)
+    if pixels_per_cm <= 0:
+        summary["left_shoulder_length_cm"] = None
+        summary["right_shoulder_length_cm"] = None
+        summary["shoulder_length_difference_cm"] = None
+        summary["shoulder_span_cm"] = None
+        return
+    summary["left_shoulder_length_cm"] = summary["left_shoulder_length_px"] / pixels_per_cm
+    summary["right_shoulder_length_cm"] = summary["right_shoulder_length_px"] / pixels_per_cm
+    summary["shoulder_length_difference_cm"] = summary["shoulder_length_difference_px"] / pixels_per_cm
+    summary["shoulder_span_cm"] = summary["shoulder_span_px"] / pixels_per_cm
+
+
+def _quality_and_shoulder_measurement(pose_result, frame, marker_size_cm: float,
+                                      marker_scale: float | None, samples: ShoulderSampleBuffer):
+    """Collect a stable left/right shoulder comparison from a front view."""
+    height, width = frame.shape[:2]
+    if not pose_result.pose_landmarks:
+        samples.clear()
+        return "ไม่พบร่างกาย — ยืนให้เห็นเต็มตัวและเพิ่มแสง", None, None
+
+    metrics, reason = analyse_front_shoulder_frame(
+        pose_result.pose_landmarks[0], width, height,
+        min_visibility=FRONT_SHOULDER_VISIBILITY_THRESHOLD,
+        front_view_min_width_to_torso=FRONT_VIEW_MIN_WIDTH_TO_TORSO,
+        min_shoulder_span_px=MIN_FRONT_SHOULDER_SPAN_PX,
+    )
+    if metrics is None:
+        samples.clear()
+        return reason, None, None
+    if metrics["body_height_px"] < _minimum_body_height(height):
+        samples.clear()
+        return "เห็นร่างกายเล็กเกินไปสำหรับเปรียบเทียบไหล่ — ขยับเข้าใกล้เล็กน้อย", None, None
+    if marker_size_cm > 0 and marker_scale is None:
+        samples.clear()
+        return "วาง ArUco ID 0 ใกล้ระนาบไหล่ เพื่อแสดงความยาวเป็นเซนติเมตร", None, None
+
+    metrics["pixels_per_cm"] = float(marker_scale or 0.0)
+    draw_shoulder_measurement_guides(frame, metrics["points"])
+    samples.add(metrics)
+    live_values = {
+        "view": "front_shoulders",
+        "left_ratio": metrics["left_shoulder_length_ratio"],
+        "right_ratio": metrics["right_shoulder_length_ratio"],
+        "difference_ratio": metrics["shoulder_length_difference_ratio"],
+        "progress": samples.progress,
+    }
+    if not samples.ready:
+        return (f"ขั้นที่ 1/2: ยืนนิ่งหน้าตรง… {samples.samples_used}/{samples.required_samples} เฟรม",
+                None, live_values)
+
+    summary = samples.result()
+    if summary is None:
+        return "กำลังรอข้อมูลไหล่", None, live_values
+    if not summary["stable"]:
+        samples.clear()
+        return "ท่าไหล่เปลี่ยนระหว่างวัด — ยืนหน้าตรงนิ่ง ๆ แล้วเริ่มเก็บข้อมูลใหม่", None, None
+    _add_absolute_shoulder_estimates(summary)
+    return "บันทึกการเปรียบเทียบไหล่แล้ว — หันด้านข้างเพื่อวิเคราะห์ท่าทาง", summary, live_values
+
+
+def _quality_and_posture_measurement(pose_result, frame, user_height_cm: float, marker_size_cm: float,
+                                     marker_scale: float | None, samples: PostureSampleBuffer,
+                                     shoulder_summary: dict):
+    """Collect the side-view posture screen, then combine it with front shoulders."""
     height, width = frame.shape[:2]
     if not pose_result.pose_landmarks:
         samples.clear()
@@ -68,13 +143,11 @@ def _quality_and_measurement(pose_result, frame, user_height_cm: float, marker_s
     if metrics is None:
         samples.clear()
         return reason, None, None
-
     if metrics["body_height_px"] < _minimum_body_height(height):
         samples.clear()
         minimum = int(_minimum_body_height(height))
         return (f"ตรวจพบแล้ว แต่ตัวแบบเล็กเกินไปสำหรับวิเคราะห์ ({metrics['body_height_px']:.0f}px; "
                 f"ต้องอย่างน้อย {minimum}px) — ขยับเข้าใกล้เล็กน้อย"), None, None
-
     if metrics["view"] != "side":
         samples.clear()
         return reason, None, {
@@ -83,13 +156,10 @@ def _quality_and_measurement(pose_result, frame, user_height_cm: float, marker_s
             "shoulder_tilt_deg": metrics["shoulder_tilt_deg"],
             "hip_tilt_deg": metrics["hip_tilt_deg"],
         }
-
     if marker_size_cm > 0 and marker_scale is None:
         samples.clear()
         return "วาง ArUco ID 0 ใกล้ระนาบลำตัว เพื่อแสดงค่าหน่วยเซนติเมตร", None, None
 
-    # The screening itself is deliberately distance-independent.  A marker is
-    # only used for optional centimetre estimates in the final report.
     metrics["pixels_per_cm"] = float(marker_scale or 0.0)
     draw_posture_guides(frame, metrics["points"])
     samples.add(metrics)
@@ -102,14 +172,14 @@ def _quality_and_measurement(pose_result, frame, user_height_cm: float, marker_s
         "progress": samples.progress,
     }
     if not samples.ready:
-        return f"ยืนนิ่งในท่าด้านข้าง… {samples.samples_used}/{samples.required_samples} เฟรม", None, live_values
+        return f"ขั้นที่ 2/2: ยืนนิ่งในท่าด้านข้าง… {samples.samples_used}/{samples.required_samples} เฟรม", None, live_values
 
     summary = samples.result()
     if summary is None:
         return "กำลังรอข้อมูลท่าทาง", None, live_values
     if not summary["stable"]:
         samples.clear()
-        return "ท่าทางเปลี่ยนระหว่างวัด — ยืนนิ่ง แล้วเริ่มใหม่", None, None
+        return "ท่าทางเปลี่ยนระหว่างวัด — ยืนนิ่ง แล้วเริ่มเก็บข้อมูลใหม่", None, None
 
     _add_absolute_estimates(summary)
     calibration = "ArUco marker (ค่าระยะเป็นเซนติเมตร)" if marker_size_cm > 0 else (
@@ -120,15 +190,17 @@ def _quality_and_measurement(pose_result, frame, user_height_cm: float, marker_s
         "input_height_cm": user_height_cm,
         "calibration": calibration,
         "samples_used": summary["samples_used"],
-        "quality": (f"ความเชื่อมั่นจุดเฉลี่ย {summary['landmark_confidence']:.2f}; "
-                    f"ความสูงร่างกาย {summary['body_height_px']:.0f}px"),
+        "total_samples_used": summary["samples_used"] + shoulder_summary["samples_used"],
+        "quality": (f"ท่าด้านข้าง {summary['landmark_confidence']:.2f}; "
+                    f"ไหล่ด้านหน้า {shoulder_summary['landmark_confidence']:.2f}"),
         "posture": summary,
-        # Retain these keys so older export integrations do not fail.  A
-        # profile image cannot give a non-foreshortened shoulder width.
-        "shoulder_cm": None,
-        "left_shoulder_cm": None,
-        "right_shoulder_cm": None,
-        "shoulder_difference_cm": None,
+        "shoulders": shoulder_summary,
+        # Compatibility mirrors.  A centimetre value exists only when the
+        # separate front view was calibrated with the ArUco marker.
+        "shoulder_cm": shoulder_summary["shoulder_span_cm"],
+        "left_shoulder_cm": shoulder_summary["left_shoulder_length_cm"],
+        "right_shoulder_cm": shoulder_summary["right_shoulder_length_cm"],
+        "shoulder_difference_cm": shoulder_summary["shoulder_length_difference_cm"],
     }
     return "วิเคราะห์ท่าทางเสร็จแล้ว", result, live_values
 
@@ -137,10 +209,10 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
         video_source: int = CAMERA_INDEX):
     """Run the posture screen.
 
-    Hold a peace sign for 1.5 seconds to begin.  Stand relaxed with your full
-    body visible, turn sideways to the camera, and hold still while the app
-    gathers stable frames.  A positive ``marker_size_cm`` enables optional
-    centimetre estimates using ArUco ID 0; posture classification always uses
+    Hold a peace sign for 1.5 seconds to begin.  The app first records a
+    front-facing left/right shoulder comparison, then asks for a side view to
+    screen posture.  A positive ``marker_size_cm`` enables optional centimetre
+    estimates using ArUco ID 0; posture classification always uses
     distance-normalised ratios and angles.
     """
     if user_height_cm <= 0 or marker_size_cm < 0:
@@ -161,7 +233,10 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
         ui = MeasurementUI(WINDOW_TITLE, WINDOW_SIZE)
         vision = VisionEngine()
         state_machine = GestureStateMachine(GESTURE_HOLD_SECONDS)
-        samples = PostureSampleBuffer(POSTURE_STABLE_SAMPLES)
+        shoulder_samples = ShoulderSampleBuffer(SHOULDER_STABLE_SAMPLES)
+        posture_samples = PostureSampleBuffer(POSTURE_STABLE_SAMPLES)
+        phase = MeasurementPhase.FRONT_SHOULDERS
+        shoulder_summary = None
         while ui.is_open:
             ok, camera_frame = cap.read()
             if not ok:
@@ -190,20 +265,43 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
 
             state, progress, transitioned = state_machine.update(peace, timestamp)
             if transitioned and state is State.MEASURING:
-                samples.clear()
+                shoulder_samples.clear()
+                posture_samples.clear()
+                shoulder_summary = None
+                phase = MeasurementPhase.FRONT_SHOULDERS
             if state is State.EXIT:
                 break
             if state is State.WAITING:
-                status = ("ยืนให้เห็นเต็มตัว หันด้านข้าง แล้วชูสองนิ้วค้างเพื่อเริ่ม"
+                status = ("ยืนให้เห็นเต็มตัว หันหน้าตรง แล้วชูสองนิ้วค้างเพื่อเริ่ม"
                           if pose_result.pose_landmarks else
                           "ไม่พบร่างกาย — ยืนในภาพเต็มตัว เพิ่มแสง หรือขยับใกล้ขึ้น")
                 if peace:
                     status += f" ({progress * GESTURE_HOLD_SECONDS:.1f}/{GESTURE_HOLD_SECONDS:.1f} วินาที)"
             else:
-                status, new_measurement, live_values = _quality_and_measurement(
-                    pose_result, frame, user_height_cm, marker_size_cm, marker_scale, samples)
+                if phase is MeasurementPhase.FRONT_SHOULDERS:
+                    status, completed_shoulders, live_values = _quality_and_shoulder_measurement(
+                        pose_result, frame, marker_size_cm, marker_scale, shoulder_samples)
+                    new_measurement = None
+                    if completed_shoulders is not None:
+                        shoulder_summary = completed_shoulders
+                        posture_samples.clear()
+                        phase = MeasurementPhase.SIDE_POSTURE
+                else:
+                    if shoulder_summary is None:
+                        # This should be unreachable, but prevents a partial
+                        # side-only report if a future workflow changes.
+                        phase = MeasurementPhase.FRONT_SHOULDERS
+                        status, new_measurement, live_values = (
+                            "เริ่มวัดไหล่ด้านหน้าก่อน เพื่อให้สรุปซ้าย–ขวาได้ครบ", None, None)
+                    else:
+                        status, new_measurement, live_values = _quality_and_posture_measurement(
+                            pose_result, frame, user_height_cm, marker_size_cm, marker_scale,
+                            posture_samples, shoulder_summary)
                 if live_values:
-                    if live_values["view"] == "side":
+                    if live_values["view"] == "front_shoulders":
+                        draw_thai_text(frame, f"ไหล่ซ้าย: {live_values['left_ratio'] * 100:.1f}% ของช่วงไหล่ | ไหล่ขวา: {live_values['right_ratio'] * 100:.1f}%", (30, 70), 20, (0, 255, 255))
+                        draw_thai_text(frame, f"ส่วนต่างในภาพ: {live_values['difference_ratio'] * 100:.1f}% | เก็บข้อมูล {live_values['progress'] * 100:.0f}%", (30, 101), 20, (0, 255, 255))
+                    elif live_values["view"] == "side":
                         draw_thai_text(frame, f"ศีรษะ–ไหล่: {live_values['head_ratio'] * 100:.1f}% ของลำตัว", (30, 70), 23, (0, 255, 255))
                         draw_thai_text(frame, f"ไหล่–สะโพก: {live_values['shoulder_ratio'] * 100:.1f}% | เอียงลำตัว: {live_values['trunk_angle']:.1f}°", (30, 103), 21, (0, 255, 255))
                         draw_thai_text(frame, f"รายละเอียดร่างกาย: {live_values['body_height_px']:.0f}px | เก็บข้อมูล {live_values['progress'] * 100:.0f}%", (30, 133), 19, (0, 255, 255))
@@ -214,7 +312,10 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                         new_measurement["capture_file"] = last_capture_path.name
                     last_measurement = new_measurement
                     show_measurement_summary(new_measurement, parent=ui.root)
-                    samples.clear()
+                    shoulder_samples.clear()
+                    posture_samples.clear()
+                    shoulder_summary = None
+                    phase = MeasurementPhase.FRONT_SHOULDERS
                     state_machine.reset()
                     full_body_was_visible = False
                     continue

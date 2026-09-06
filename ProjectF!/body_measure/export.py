@@ -15,14 +15,24 @@ def save_measurement_to_excel(measurement: dict, output_path: str | Path) -> Pat
         raise RuntimeError("Excel export requires pandas and openpyxl") from exc
     path = Path(output_path).with_suffix(".xlsx")
     posture = measurement.get("posture", {})
+    shoulders = measurement.get("shoulders", {})
     row = {
         "Measured At": measurement.get("measured_at"),
         "Input Height (cm)": measurement.get("input_height_cm"),
         "Calibration": measurement.get("calibration"),
         "Stable Samples": measurement.get("samples_used"),
         "Shoulder Width (cm; front view only)": measurement.get("shoulder_cm"),
-        "Left Shoulder Length (cm)": measurement.get("left_shoulder_cm"),
-        "Right Shoulder Length (cm)": measurement.get("right_shoulder_cm"),
+        "Left Shoulder Length (cm; front view)": measurement.get("left_shoulder_cm"),
+        "Right Shoulder Length (cm; front view)": measurement.get("right_shoulder_cm"),
+        "Shoulder Difference (cm; front view)": measurement.get("shoulder_difference_cm"),
+        "Left Shoulder Length (% shoulder span)": _percent(shoulders.get("left_shoulder_length_ratio")),
+        "Right Shoulder Length (% shoulder span)": _percent(shoulders.get("right_shoulder_length_ratio")),
+        "Shoulder Difference (% shoulder span)": _percent(shoulders.get("shoulder_length_difference_ratio")),
+        "Shoulder Image Comparison": shoulders.get("shoulder_balance_label"),
+        "Front Shoulder Samples": shoulders.get("samples_used"),
+        "Front Shoulder Stable": shoulders.get("stable"),
+        "Front Shoulder Confidence": shoulders.get("landmark_confidence"),
+        "Shoulder Tilt (deg; front view)": shoulders.get("shoulder_tilt_deg"),
         "Posture Screening Level": posture.get("screening_level"),
         "Posture Screening Score (0-6)": posture.get("screening_score"),
         "Head-Shoulder Offset (% torso)": _percent(posture.get("head_shoulder_offset_ratio")),

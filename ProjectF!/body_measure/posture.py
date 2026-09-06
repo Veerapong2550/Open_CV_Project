@@ -86,6 +86,32 @@ def _joint_angle(first: tuple[float, float], vertex: tuple[float, float],
     return math.degrees(math.acos(max(-1.0, min(1.0, cosine))))
 
 
+def _segment_line_intersection(segment_start: tuple[float, float], segment_end: tuple[float, float],
+                               line_start: tuple[float, float], line_end: tuple[float, float]) -> tuple[float, float] | None:
+    """Intersect a shoulder segment with the estimated torso midline.
+
+    Pose does not expose a literal neck landmark.  We use the intersection of
+    the shoulder line and an upper-body midline as a repeatable reference for
+    comparing the two sides.  An implausible intersection is rejected rather
+    than silently replaced with a midpoint, which would falsely make a poor
+    frame look symmetrical.
+    """
+    sx, sy = segment_start
+    ex, ey = segment_end
+    lx, ly = line_start
+    rx, ry = line_end
+    shoulder_x, shoulder_y = ex - sx, ey - sy
+    line_x, line_y = rx - lx, ry - ly
+    denominator = shoulder_x * line_y - shoulder_y * line_x
+    if abs(denominator) < 1e-6:
+        return None
+    factor = ((lx - sx) * line_y - (ly - sy) * line_x) / denominator
+    if factor < -0.05 or factor > 1.05:
+        return None
+    factor = max(0.0, min(1.0, factor))
+    return sx + factor * shoulder_x, sy + factor * shoulder_y
+
+
 def _band(value: float, caution: float, elevated: float) -> int:
     if value >= elevated:
         return 2
@@ -127,6 +153,30 @@ def classify_profile(metrics: dict) -> dict:
         "head_component": head_component,
         "shoulder_component": shoulder_component,
         "trunk_component": trunk_component,
+    }
+
+
+def classify_shoulder_balance(asymmetry_ratio: float, shoulder_span_px: float,
+                              variability_ratio: float = 0.0) -> dict:
+    """Describe left/right image-projection difference without clinical claims.
+
+    A front camera cannot establish a skeletal shoulder asymmetry.  The
+    tolerance is deliberately conservative: at least 7% of shoulder span,
+    six pixels of landmark uncertainty, and twice the observed frame-to-frame
+    variation.  The only actionable output is whether the image difference
+    merits a repeat capture with the camera and body aligned.
+    """
+    tolerance_ratio = max(0.07, 6.0 / max(shoulder_span_px, 1.0), 2.0 * variability_ratio)
+    if asymmetry_ratio <= tolerance_ratio:
+        level = "within_tolerance"
+        label = "ความต่างซ้าย–ขวาอยู่ในช่วงความคลาดเคลื่อนของภาพ"
+    else:
+        level = "recheck"
+        label = "พบความต่างของระยะที่ฉายบนภาพ ควรวัดซ้ำโดยหันหน้าตรงและตั้งกล้องให้ตรง"
+    return {
+        "shoulder_balance_level": level,
+        "shoulder_balance_label": label,
+        "shoulder_difference_tolerance_ratio": tolerance_ratio,
     }
 
 
@@ -221,6 +271,166 @@ def analyse_posture_frame(landmarks: Sequence[object], frame_width: int, frame_h
     }
     metrics.update(classify_profile(metrics))
     return metrics, "พร้อมวิเคราะห์"
+
+
+def analyse_front_shoulder_frame(landmarks: Sequence[object], frame_width: int, frame_height: int,
+                                 min_visibility: float = 0.55,
+                                 front_view_min_width_to_torso: float = 0.72,
+                                 min_shoulder_span_px: float = 60.0) -> tuple[dict | None, str]:
+    """Measure projected left/right shoulder lengths from a front-facing frame.
+
+    Each length runs from a repeatable torso-midline proxy to the corresponding
+    MediaPipe shoulder landmark.  The calculation is useful for comparing the
+    two sides only in a front view.  It is intentionally not called a bone
+    length and reports centimetres only when an ArUco marker calibrates the
+    same image plane.
+    """
+    if len(landmarks) <= RIGHT_ANKLE:
+        return None, "ไม่พบจุดร่างกายครบถ้วน"
+
+    ears = _centroid(landmarks, (LEFT_EAR, RIGHT_EAR), frame_width, frame_height, min_visibility)
+    left_shoulder = _centroid(landmarks, (LEFT_SHOULDER,), frame_width, frame_height, min_visibility)
+    right_shoulder = _centroid(landmarks, (RIGHT_SHOULDER,), frame_width, frame_height, min_visibility)
+    hip = _centroid(landmarks, (LEFT_HIP, RIGHT_HIP), frame_width, frame_height, min_visibility)
+    ankle = _centroid(landmarks, (LEFT_ANKLE, RIGHT_ANKLE), frame_width, frame_height, min_visibility)
+    if not all((ears, left_shoulder, right_shoulder, hip, ankle)):
+        return None, "ให้เห็นหู ไหล่ สะโพก และข้อเท้าชัดเจน"
+
+    shoulder_span_px = math.dist(left_shoulder, right_shoulder)
+    torso_px = math.dist(((left_shoulder[0] + right_shoulder[0]) / 2.0,
+                          (left_shoulder[1] + right_shoulder[1]) / 2.0), hip)
+    hip_span_px = _pair_span(landmarks, LEFT_HIP, RIGHT_HIP, frame_width, frame_height,
+                             min_visibility)
+    if shoulder_span_px < min_shoulder_span_px or torso_px < 20.0 or hip_span_px is None:
+        return None, "ภาพไหล่ยังเล็กเกินไปสำหรับเปรียบเทียบซ้าย–ขวา — ขยับเข้าใกล้เล็กน้อย"
+
+    view_width_to_torso_ratio = (shoulder_span_px + hip_span_px) / (2.0 * torso_px)
+    shoulder_width_to_torso_ratio = shoulder_span_px / torso_px
+    hip_width_to_torso_ratio = hip_span_px / torso_px
+    if (view_width_to_torso_ratio < front_view_min_width_to_torso
+            or shoulder_width_to_torso_ratio < front_view_min_width_to_torso
+            or hip_width_to_torso_ratio < front_view_min_width_to_torso * 0.75):
+        return None, "หันหน้าตรงเข้ากล้องให้ไหล่ทั้งสองข้างเห็นชัด เพื่อวัดไหล่ซ้าย–ขวา"
+
+    torso_midline_proxy = _segment_line_intersection(left_shoulder, right_shoulder, ears, hip)
+    if torso_midline_proxy is None:
+        return None, "แนวกึ่งกลางลำตัวยังไม่ชัด — ยืนตรงและหันหน้าตรงเข้ากล้อง"
+    left_length_px = math.dist(left_shoulder, torso_midline_proxy)
+    right_length_px = math.dist(right_shoulder, torso_midline_proxy)
+    asymmetry_ratio = abs(left_length_px - right_length_px) / shoulder_span_px
+    shoulder_tilt_deg = math.degrees(math.atan2(
+        abs(right_shoulder[1] - left_shoulder[1]), max(shoulder_span_px, 1e-6),
+    ))
+    body_height_px = max(ears[1], ankle[1]) - min(ears[1], ankle[1])
+    confidence_indexes = (LEFT_EAR, RIGHT_EAR, LEFT_SHOULDER, RIGHT_SHOULDER,
+                          LEFT_HIP, RIGHT_HIP, LEFT_ANKLE, RIGHT_ANKLE)
+    confidence = float(np.mean([
+        _visibility(landmarks[index]) for index in confidence_indexes
+        if index < len(landmarks)
+    ]))
+    metrics = {
+        "view": "front",
+        "body_height_px": float(body_height_px),
+        "body_height_ratio": float(body_height_px / max(frame_height, 1)),
+        "torso_px": float(torso_px),
+        "shoulder_span_px": float(shoulder_span_px),
+        "view_width_to_torso_ratio": float(view_width_to_torso_ratio),
+        "shoulder_width_to_torso_ratio": float(shoulder_width_to_torso_ratio),
+        "hip_width_to_torso_ratio": float(hip_width_to_torso_ratio),
+        "landmark_confidence": confidence,
+        "left_shoulder_length_px": float(left_length_px),
+        "right_shoulder_length_px": float(right_length_px),
+        "left_shoulder_length_ratio": float(left_length_px / shoulder_span_px),
+        "right_shoulder_length_ratio": float(right_length_px / shoulder_span_px),
+        "shoulder_length_difference_px": float(abs(left_length_px - right_length_px)),
+        "shoulder_length_difference_ratio": float(asymmetry_ratio),
+        "shoulder_tilt_deg": float(shoulder_tilt_deg),
+        "points": {
+            "left_shoulder": left_shoulder,
+            "torso_midline_proxy": torso_midline_proxy,
+            "right_shoulder": right_shoulder,
+        },
+    }
+    metrics.update(classify_shoulder_balance(asymmetry_ratio, shoulder_span_px))
+    return metrics, "พร้อมวัดความยาวไหล่"
+
+
+class ShoulderSampleBuffer:
+    """Collect a stable, front-view comparison of left and right shoulders."""
+
+    METRIC_KEYS = (
+        "body_height_px",
+        "body_height_ratio",
+        "torso_px",
+        "shoulder_span_px",
+        "pixels_per_cm",
+        "view_width_to_torso_ratio",
+        "landmark_confidence",
+        "left_shoulder_length_px",
+        "right_shoulder_length_px",
+        "left_shoulder_length_ratio",
+        "right_shoulder_length_ratio",
+        "shoulder_length_difference_px",
+        "shoulder_length_difference_ratio",
+        "shoulder_tilt_deg",
+    )
+
+    def __init__(self, required_samples: int = 18):
+        if required_samples < 3:
+            raise ValueError("required_samples must be at least 3")
+        self.required_samples = required_samples
+        self._samples: deque[dict] = deque(maxlen=required_samples)
+
+    def clear(self) -> None:
+        self._samples.clear()
+
+    @property
+    def samples_used(self) -> int:
+        return len(self._samples)
+
+    @property
+    def progress(self) -> float:
+        return min(1.0, self.samples_used / self.required_samples)
+
+    @property
+    def ready(self) -> bool:
+        return self.samples_used >= self.required_samples
+
+    def add(self, metrics: dict) -> None:
+        if metrics.get("view") != "front":
+            raise ValueError("Only front-view shoulder frames may be collected")
+        self._samples.append({key: float(metrics[key]) for key in self.METRIC_KEYS})
+
+    def result(self) -> dict | None:
+        if not self.ready:
+            return None
+        values = {
+            key: np.asarray([sample[key] for sample in self._samples], dtype=float)
+            for key in self.METRIC_KEYS
+        }
+        summary = {key: float(np.median(value)) for key, value in values.items()}
+        left_iqr = float(np.percentile(values["left_shoulder_length_ratio"], 75)
+                         - np.percentile(values["left_shoulder_length_ratio"], 25))
+        right_iqr = float(np.percentile(values["right_shoulder_length_ratio"], 75)
+                          - np.percentile(values["right_shoulder_length_ratio"], 25))
+        difference_iqr = float(np.percentile(values["shoulder_length_difference_ratio"], 75)
+                               - np.percentile(values["shoulder_length_difference_ratio"], 25))
+        tilt_iqr = float(np.percentile(values["shoulder_tilt_deg"], 75)
+                         - np.percentile(values["shoulder_tilt_deg"], 25))
+        stable = left_iqr <= 0.025 and right_iqr <= 0.025 and difference_iqr <= 0.020 and tilt_iqr <= 3.0
+        summary.update(classify_shoulder_balance(
+            summary["shoulder_length_difference_ratio"], summary["shoulder_span_px"], difference_iqr,
+        ))
+        summary.update({
+            "view": "front",
+            "samples_used": self.samples_used,
+            "left_length_iqr": left_iqr,
+            "right_length_iqr": right_iqr,
+            "difference_iqr": difference_iqr,
+            "tilt_iqr": tilt_iqr,
+            "stable": stable,
+        })
+        return summary
 
 
 class PostureSampleBuffer:
