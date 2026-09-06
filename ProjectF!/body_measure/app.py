@@ -1,9 +1,8 @@
-"""Application entry point integrating camera, vision, calibration, and UI."""
+"""Camera application for a distance-tolerant side-profile posture screen."""
 
 from __future__ import annotations
 
 from datetime import datetime
-import math
 import time
 
 import cv2
@@ -11,94 +10,138 @@ import cv2
 from .calibration import get_pixel_scale
 from .capture import save_full_body_capture
 from .config import (CAMERA_INDEX, DEFAULT_HEIGHT_CM, DEFAULT_MARKER_CM, FRAME_HEIGHT,
-                     FRAME_WIDTH, GESTURE_HOLD_SECONDS,
+                     FRAME_WIDTH, GESTURE_HOLD_SECONDS, MIN_ANALYSIS_BODY_HEIGHT_PX,
+                     MIN_ANALYSIS_BODY_HEIGHT_RATIO, POSTURE_STABLE_SAMPLES,
+                     POSTURE_VISIBILITY_THRESHOLD, SIDE_VIEW_MAX_WIDTH_TO_TORSO,
                      VISIBILITY_THRESHOLD, WINDOW_SIZE, WINDOW_TITLE)
+from .posture import PostureSampleBuffer, analyse_posture_frame
 from .state_machine import GestureStateMachine, State
 from .ui import MeasurementUI, show_measurement_summary
-from .utils import (PointSmoother, draw_hand_landmarks, draw_thai_text,
-                    draw_pose_landmarks, is_peace_sign, shoulder_center)
+from .utils import (draw_hand_landmarks, draw_pose_landmarks, draw_posture_guides,
+                    draw_thai_text, is_peace_sign)
 from .vision import VisionEngine
 
 
 def _has_full_body(pose_result) -> bool:
-    """Return whether the shoulders and ankles are reliably visible."""
+    """Return whether enough of the body is present to save a useful capture."""
     if not pose_result.pose_landmarks:
         return False
     landmarks = pose_result.pose_landmarks[0]
-    required = (landmarks[0], landmarks[11], landmarks[12], landmarks[27], landmarks[28])
-    return all(getattr(point, "visibility", 1.0) > VISIBILITY_THRESHOLD for point in required)
+    required = (0, 11, 12, 23, 24, 27, 28)
+    if len(landmarks) <= max(required):
+        return False
+    return sum(landmarks[index].visibility >= VISIBILITY_THRESHOLD for index in required) >= 6
 
 
-def _quality_and_measurement(pose_result, frame, timestamp, user_height_cm, marker_size_cm,
-                             marker_scale, smoother):
-    """Analyse one frame and return status, an immediate result, and live values."""
+def _minimum_body_height(frame_height: int) -> float:
+    """Protect measurement quality while retaining much more range than before."""
+    return max(float(MIN_ANALYSIS_BODY_HEIGHT_PX), frame_height * MIN_ANALYSIS_BODY_HEIGHT_RATIO)
+
+
+def _add_absolute_estimates(summary: dict) -> None:
+    """Add optional cm estimates only when an ArUco scale was observed."""
+    pixels_per_cm = summary.get("pixels_per_cm", 0.0)
+    if pixels_per_cm <= 0:
+        summary["head_shoulder_offset_cm"] = None
+        summary["shoulder_hip_offset_cm"] = None
+        summary["torso_cm"] = None
+        return
+    torso_cm = summary["torso_px"] / pixels_per_cm
+    summary["torso_cm"] = torso_cm
+    summary["head_shoulder_offset_cm"] = summary["head_shoulder_offset_ratio"] * torso_cm
+    summary["shoulder_hip_offset_cm"] = summary["shoulder_hip_offset_ratio"] * torso_cm
+
+
+def _quality_and_measurement(pose_result, frame, user_height_cm: float, marker_size_cm: float,
+                             marker_scale: float | None, samples: PostureSampleBuffer):
+    """Analyse one side-view frame and return status, a result, and live values."""
     height, width = frame.shape[:2]
     if not pose_result.pose_landmarks:
-        return "Keep your full body visible", None, None
+        samples.clear()
+        return "ไม่พบร่างกาย — ยืนให้เห็นเต็มตัวและเพิ่มแสง", None, None
 
-    landmarks = pose_result.pose_landmarks[0]
-    left_shoulder, right_shoulder, nose = landmarks[11], landmarks[12], landmarks[0]
-    left_ankle, right_ankle = landmarks[27], landmarks[28]
-    required = (nose, left_shoulder, right_shoulder, left_ankle, right_ankle)
-    if not all(getattr(point, "visibility", 1.0) > VISIBILITY_THRESHOLD for point in required):
-        return "Keep your full body visible", None, None
+    metrics, reason = analyse_posture_frame(
+        pose_result.pose_landmarks[0], width, height,
+        min_visibility=POSTURE_VISIBILITY_THRESHOLD,
+        side_view_max_width_to_torso=SIDE_VIEW_MAX_WIDTH_TO_TORSO,
+    )
+    if metrics is None:
+        samples.clear()
+        return reason, None, None
 
-    left = smoother.update("left_shoulder", timestamp, left_shoulder.x * width, left_shoulder.y * height)
-    right = smoother.update("right_shoulder", timestamp, right_shoulder.x * width, right_shoulder.y * height)
-    nose_xy = smoother.update("nose", timestamp, nose.x * width, nose.y * height)
-    base = smoother.update("ankle_midpoint", timestamp,
-                           (left_ankle.x + right_ankle.x) * width / 2,
-                           (left_ankle.y + right_ankle.y) * height / 2)
-    neck = shoulder_center(left, right, nose_xy, base)
-    shoulder_angle = abs(math.degrees(math.atan2(right[1] - left[1], right[0] - left[0])))
+    if metrics["body_height_px"] < _minimum_body_height(height):
+        samples.clear()
+        minimum = int(_minimum_body_height(height))
+        return (f"ตรวจพบแล้ว แต่ตัวแบบเล็กเกินไปสำหรับวิเคราะห์ ({metrics['body_height_px']:.0f}px; "
+                f"ต้องอย่างน้อย {minimum}px) — ขยับเข้าใกล้เล็กน้อย"), None, None
 
-    scale = marker_scale
-    if scale is None and marker_size_cm > 0:
-        return "Show ArUco ID 0 beside your shoulders", None, None
-    if scale is None:
-        # This fallback estimates scale from a known user height, so it remains
-        # sensitive to perspective and should not be presented as calibration.
-        scale = math.dist(nose_xy, base) * 1.06 / user_height_cm if user_height_cm > 0 else None
-    if scale is None or scale <= 0:
-        return "Unable to determine scale", None, None
+    if metrics["view"] != "side":
+        samples.clear()
+        return reason, None, {
+            "view": "front",
+            "body_height_px": metrics["body_height_px"],
+            "shoulder_tilt_deg": metrics["shoulder_tilt_deg"],
+            "hip_tilt_deg": metrics["hip_tilt_deg"],
+        }
 
-    shoulder_cm = math.dist(left, right) / scale
-    left_cm = math.dist(left, neck) / scale
-    right_cm = math.dist(right, neck) / scale
-    shoulder_difference_cm = abs(left_cm - right_cm)
+    if marker_size_cm > 0 and marker_scale is None:
+        samples.clear()
+        return "วาง ArUco ID 0 ใกล้ระนาบลำตัว เพื่อแสดงค่าหน่วยเซนติเมตร", None, None
+
+    # The screening itself is deliberately distance-independent.  A marker is
+    # only used for optional centimetre estimates in the final report.
+    metrics["pixels_per_cm"] = float(marker_scale or 0.0)
+    draw_posture_guides(frame, metrics["points"])
+    samples.add(metrics)
     live_values = {
-        "shoulder_cm": shoulder_cm,
-        "left_shoulder_cm": left_cm,
-        "right_shoulder_cm": right_cm,
+        "view": "side",
+        "head_ratio": metrics["head_shoulder_offset_ratio"],
+        "shoulder_ratio": metrics["shoulder_hip_offset_ratio"],
+        "trunk_angle": metrics["trunk_inclination_deg"],
+        "body_height_px": metrics["body_height_px"],
+        "progress": samples.progress,
     }
-    quality_notes = []
-    if abs(neck[0] - width / 2) > width * 0.10:
-        quality_notes.append("Move to centre")
-    if shoulder_angle > 5.0:
-        quality_notes.append("Level shoulders")
+    if not samples.ready:
+        return f"ยืนนิ่งในท่าด้านข้าง… {samples.samples_used}/{samples.required_samples} เฟรม", None, live_values
 
-    for point, color in ((left, (0, 255, 0)), (right, (0, 255, 0)), (neck, (0, 255, 255))):
-        cv2.circle(frame, (int(point[0]), int(point[1])), 7, color, -1, cv2.LINE_AA)
-    cv2.line(frame, tuple(map(int, left)), tuple(map(int, right)), (255, 0, 0), 3, cv2.LINE_AA)
-    return "Measurement complete", {
+    summary = samples.result()
+    if summary is None:
+        return "กำลังรอข้อมูลท่าทาง", None, live_values
+    if not summary["stable"]:
+        samples.clear()
+        return "ท่าทางเปลี่ยนระหว่างวัด — ยืนนิ่ง แล้วเริ่มใหม่", None, None
+
+    _add_absolute_estimates(summary)
+    calibration = "ArUco marker (ค่าระยะเป็นเซนติเมตร)" if marker_size_cm > 0 else (
+        "ใช้สัดส่วนและมุมที่ไม่ขึ้นกับระยะกล้อง (ไม่มีค่าเซนติเมตร)"
+    )
+    result = {
         "measured_at": datetime.now().isoformat(timespec="seconds"),
         "input_height_cm": user_height_cm,
-        "shoulder_cm": shoulder_cm,
-        "left_shoulder_cm": left_cm,
-        "right_shoulder_cm": right_cm,
-        "shoulder_difference_cm": shoulder_difference_cm,
-        "samples_used": 1,
-        "calibration": "ArUco marker" if marker_size_cm > 0 else "Height-based estimate",
-        "quality": " • ".join(quality_notes) if quality_notes else "Good position",
-    }, live_values
+        "calibration": calibration,
+        "samples_used": summary["samples_used"],
+        "quality": (f"ความเชื่อมั่นจุดเฉลี่ย {summary['landmark_confidence']:.2f}; "
+                    f"ความสูงร่างกาย {summary['body_height_px']:.0f}px"),
+        "posture": summary,
+        # Retain these keys so older export integrations do not fail.  A
+        # profile image cannot give a non-foreshortened shoulder width.
+        "shoulder_cm": None,
+        "left_shoulder_cm": None,
+        "right_shoulder_cm": None,
+        "shoulder_difference_cm": None,
+    }
+    return "วิเคราะห์ท่าทางเสร็จแล้ว", result, live_values
 
 
 def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAULT_MARKER_CM,
         video_source: int = CAMERA_INDEX):
-    """Run the integrated application and return its last completed measurement.
+    """Run the posture screen.
 
-    A peace sign held for 1.5 seconds starts the measurement; repeat it to exit.
-    Passing a positive ``marker_size_cm`` enables true ArUco calibration (ID 0).
+    Hold a peace sign for 1.5 seconds to begin.  Stand relaxed with your full
+    body visible, turn sideways to the camera, and hold still while the app
+    gathers stable frames.  A positive ``marker_size_cm`` enables optional
+    centimetre estimates using ArUco ID 0; posture classification always uses
+    distance-normalised ratios and angles.
     """
     if user_height_cm <= 0 or marker_size_cm < 0:
         raise ValueError("user_height_cm must be positive and marker_size_cm cannot be negative")
@@ -111,7 +154,6 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
 
     ui = None
     vision = None
-    measurement = None
     last_measurement = None
     full_body_was_visible = False
     last_capture_path = None
@@ -119,13 +161,13 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
         ui = MeasurementUI(WINDOW_TITLE, WINDOW_SIZE)
         vision = VisionEngine()
         state_machine = GestureStateMachine(GESTURE_HOLD_SECONDS)
-        smoother = PointSmoother()
+        samples = PostureSampleBuffer(POSTURE_STABLE_SAMPLES)
         while ui.is_open:
             ok, camera_frame = cap.read()
             if not ok:
                 break
-            # Detect before mirroring: an ArUco pattern can no longer decode as
-            # the same ID after a horizontal flip.
+            # Detect the marker before mirroring; a horizontally flipped
+            # ArUco marker no longer decodes as the same ID.
             marker_scale, marker_corners = get_pixel_scale(camera_frame, marker_size_cm)
             frame = cv2.flip(camera_frame, 1)
             if marker_corners is not None:
@@ -134,51 +176,49 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                 cv2.polylines(frame, [marker_corners], True, (0, 255, 255), 2, cv2.LINE_AA)
             timestamp = time.monotonic()
             pose_result, hand_result = vision.process(frame, int(timestamp * 1000))
+
             if pose_result.pose_landmarks:
-                # Show live feedback before the peace-sign workflow starts so
-                # the user can immediately tell whether the full body is seen.
                 draw_pose_landmarks(frame, pose_result.pose_landmarks[0])
             full_body_visible = _has_full_body(pose_result)
             if full_body_visible and not full_body_was_visible:
                 last_capture_path = save_full_body_capture(frame)
             full_body_was_visible = full_body_visible
+
             peace = bool(hand_result.hand_landmarks and is_peace_sign(hand_result.hand_landmarks[0]))
             if hand_result.hand_landmarks:
                 draw_hand_landmarks(frame, hand_result.hand_landmarks[0])
 
             state, progress, transitioned = state_machine.update(peace, timestamp)
             if transitioned and state is State.MEASURING:
-                smoother.clear()
-                measurement = None
+                samples.clear()
             if state is State.EXIT:
                 break
             if state is State.WAITING:
-                status = "Hold a peace sign to begin" if pose_result.pose_landmarks else "No body detected — step back and improve lighting"
+                status = ("ยืนให้เห็นเต็มตัว หันด้านข้าง แล้วชูสองนิ้วค้างเพื่อเริ่ม"
+                          if pose_result.pose_landmarks else
+                          "ไม่พบร่างกาย — ยืนในภาพเต็มตัว เพิ่มแสง หรือขยับใกล้ขึ้น")
                 if peace:
-                    status += f" ({progress * GESTURE_HOLD_SECONDS:.1f}/{GESTURE_HOLD_SECONDS:.1f}s)"
+                    status += f" ({progress * GESTURE_HOLD_SECONDS:.1f}/{GESTURE_HOLD_SECONDS:.1f} วินาที)"
             else:
                 status, new_measurement, live_values = _quality_and_measurement(
-                    pose_result, frame, timestamp, user_height_cm, marker_size_cm, marker_scale,
-                    smoother)
+                    pose_result, frame, user_height_cm, marker_size_cm, marker_scale, samples)
                 if live_values:
-                    draw_thai_text(frame, f"Live shoulder width: {live_values['shoulder_cm']:.1f} cm", (30, 70), 26, (0, 255, 255))
-                    draw_thai_text(frame, f"Left / right: {live_values['left_shoulder_cm']:.1f} / {live_values['right_shoulder_cm']:.1f} cm", (30, 105), 22, (0, 255, 255))
+                    if live_values["view"] == "side":
+                        draw_thai_text(frame, f"ศีรษะ–ไหล่: {live_values['head_ratio'] * 100:.1f}% ของลำตัว", (30, 70), 23, (0, 255, 255))
+                        draw_thai_text(frame, f"ไหล่–สะโพก: {live_values['shoulder_ratio'] * 100:.1f}% | เอียงลำตัว: {live_values['trunk_angle']:.1f}°", (30, 103), 21, (0, 255, 255))
+                        draw_thai_text(frame, f"รายละเอียดร่างกาย: {live_values['body_height_px']:.0f}px | เก็บข้อมูล {live_values['progress'] * 100:.0f}%", (30, 133), 19, (0, 255, 255))
+                    else:
+                        draw_thai_text(frame, f"ภาพหน้า: ไหล่เอียง {live_values['shoulder_tilt_deg']:.1f}° | สะโพกเอียง {live_values['hip_tilt_deg']:.1f}°", (30, 70), 21, (0, 255, 255))
                 if new_measurement:
-                    measurement = new_measurement
                     if last_capture_path is not None:
-                        measurement["capture_file"] = last_capture_path.name
+                        new_measurement["capture_file"] = last_capture_path.name
                     last_measurement = new_measurement
-                    # Show the result for every completed cycle, then return
-                    # to the live camera for another measurement.
-                    show_measurement_summary(measurement, parent=ui.root)
-                    smoother.clear()
-                    measurement = None
+                    show_measurement_summary(new_measurement, parent=ui.root)
+                    samples.clear()
                     state_machine.reset()
                     full_body_was_visible = False
                     continue
-                if measurement:
-                    draw_thai_text(frame, f"Shoulder width: {measurement['shoulder_cm']:.1f} cm", (30, 70), 28, (0, 255, 0))
-            draw_thai_text(frame, status, (30, 30), 24, (255, 255, 255))
+            draw_thai_text(frame, status, (30, 30), 22, (255, 255, 255))
             ui.show_frame(frame)
     finally:
         cap.release()

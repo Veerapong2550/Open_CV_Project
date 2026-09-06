@@ -135,6 +135,23 @@ def draw_pose_landmarks(frame: np.ndarray, landmarks: Iterable, min_visibility: 
             cv2.circle(frame, point, 3, (0, 220, 255), -1, cv2.LINE_AA)
 
 
+def draw_posture_guides(frame: np.ndarray, points: dict[str, tuple[float, float]]) -> None:
+    """Overlay the side-view alignment chain used by the posture screen."""
+    required = ("ear", "shoulder", "hip", "ankle")
+    if not all(name in points for name in required):
+        return
+    ear, shoulder, hip, ankle = (tuple(map(int, points[name])) for name in required)
+    # The yellow chain is the measurement path; the grey line through the hip
+    # is a visual vertical reference, not an anatomical spine estimate.
+    cv2.line(frame, ear, shoulder, (0, 220, 255), 3, cv2.LINE_AA)
+    cv2.line(frame, shoulder, hip, (0, 220, 255), 3, cv2.LINE_AA)
+    cv2.line(frame, hip, ankle, (0, 220, 255), 2, cv2.LINE_AA)
+    cv2.line(frame, (hip[0], 0), (hip[0], frame.shape[0] - 1), (105, 105, 105), 1, cv2.LINE_AA)
+    for point, color in ((ear, (0, 80, 255)), (shoulder, (0, 255, 0)),
+                         (hip, (255, 170, 0)), (ankle, (255, 255, 255))):
+        cv2.circle(frame, point, 6, color, -1, cv2.LINE_AA)
+
+
 def shoulder_center(left: tuple[float, float], right: tuple[float, float],
                     nose: tuple[float, float], base: tuple[float, float]) -> tuple[float, float]:
     lx, ly = left

@@ -1,6 +1,7 @@
-"""Top‑level package for the Real‑time Precision Body Measurement System.
-Provides a convenient entry point: `run()`.
-"""
+"""Top-level package for the real-time posture screening application."""
 
-# pyrefly: ignore [missing-import]
-from .app import run
+
+def run(*args, **kwargs):
+    """Lazily load the camera runtime while keeping geometry tools importable."""
+    from .app import run as camera_run
+    return camera_run(*args, **kwargs)

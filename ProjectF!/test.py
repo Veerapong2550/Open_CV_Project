@@ -24,7 +24,7 @@ def _prompt_float(prompt: str, default: float, minimum: float) -> float:
 
 if __name__ == "__main__":
     height = _prompt_float("Your height (cm)", DEFAULT_HEIGHT_CM, 0.1)
-    marker_size = _prompt_float("ArUco marker side (cm; 0 = estimate)", DEFAULT_MARKER_CM, 0.0)
+    marker_size = _prompt_float("ArUco marker side (cm; 0 = ratios/angles only)", DEFAULT_MARKER_CM, 0.0)
     result = run(user_height_cm=height, marker_size_cm=marker_size)
     if result:
         print("Measurement result:", result)
