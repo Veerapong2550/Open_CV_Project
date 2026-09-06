@@ -107,16 +107,48 @@ POSE_CONNECTIONS = (
 
 
 def is_peace_sign(landmarks: Iterable) -> bool:
+    """Recognise a V (peace) sign with more tolerant distance checks.
+
+    This version relaxes the extension and folding thresholds to improve
+    detection range when the hand is farther from the camera.
+    """
     points = list(landmarks)
-    return (points[8].y < points[6].y and points[12].y < points[10].y
-            and points[16].y > points[14].y and points[20].y > points[18].y)
+    if len(points) < 21:
+        return False
+
+    def distance(first: int, second: int) -> float:
+        return math.hypot(points[first].x - points[second].x,
+                          points[first].y - points[second].y)
+
+    # Use wrist‑to‑middle‑finger distance as hand size reference.
+    hand_size = max(distance(0, 9), 0.01)
+
+    # Relaxed multipliers (original 0.22/0.12/0.18).
+    EXT_FACTOR = 0.18
+    FOLD_FACTOR = 0.15
+    VERT_FACTOR = 0.20
+
+    def extended(tip: int, pip: int) -> bool:
+        return distance(tip, 0) > distance(pip, 0) + hand_size * EXT_FACTOR
+
+    def folded(tip: int, pip: int) -> bool:
+        return (
+            distance(tip, 0) <= distance(pip, 0) + hand_size * FOLD_FACTOR
+            or points[tip].y >= points[pip].y - hand_size * VERT_FACTOR
+        )
+
+    return (
+        extended(8, 6) and extended(12, 10) and
+        folded(16, 14) and folded(20, 18)
+    )
 
 
 def draw_hand_landmarks(frame: np.ndarray, landmarks: Iterable) -> None:
     height, width = frame.shape[:2]
     points = [(int(point.x * width), int(point.y * height)) for point in landmarks]
     for start, end in HAND_CONNECTIONS:
-        cv2.line(frame, points[start], points[end], (0, 200, 0), 2, cv2.LINE_AA)
+        if start < len(points) and end < len(points):
+            cv2.line(frame, points[start], points[end], (0, 200, 0), 2, cv2.LINE_AA)
     for point in points:
         cv2.circle(frame, point, 4, (0, 0, 255), -1, cv2.LINE_AA)
 

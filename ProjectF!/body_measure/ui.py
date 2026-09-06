@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tkinter as tk
+from tkinter import messagebox
 
 import cv2
 import numpy as np
@@ -16,6 +17,28 @@ MUTED = "#aebdca"
 TEXT = "#f4f7fb"
 ACCENT = "#55d6be"
 CONTENT_WRAP = 620
+
+
+def show_startup_error(message: str, parent: tk.Misc | None = None) -> None:
+    """Make startup failures visible even when the camera window never opened."""
+    temporary_root: tk.Tk | None = None
+    try:
+        if parent is None:
+            temporary_root = tk.Tk()
+            temporary_root.withdraw()
+            parent = temporary_root
+        messagebox.showerror("เปิดโปรแกรมไม่สำเร็จ", message, parent=parent)
+    except tk.TclError:
+        # A terminal still receives a useful error on headless machines or if
+        # Windows cannot initialise Tk; previously this failure was silent for
+        # people launching the program by double-clicking.
+        print(f"เปิดโปรแกรมไม่สำเร็จ: {message}")
+    finally:
+        if temporary_root is not None:
+            try:
+                temporary_root.destroy()
+            except tk.TclError:
+                pass
 
 
 def _status_style(level: str) -> dict[str, str]:

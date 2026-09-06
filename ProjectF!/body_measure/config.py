@@ -55,4 +55,15 @@ FRONT_VIEW_MIN_WIDTH_TO_TORSO = 0.72
 FAR_POSE_REFINEMENT_INTERVAL_MS = 100
 FAR_POSE_SEARCH_INTERVAL_MS = 350
 FAR_POSE_ACTIVE_ROI_TTL_MS = 1500
+
+# Gesture detection has its own enlarged crop.  A hand occupies far fewer
+# pixels than a full body, so using a lower threshold on a crop around each
+# wrist is both more useful at range and less prone to accepting background
+# detail than lowering only the full-frame detector threshold.
+HAND_DETECTION_CONFIDENCE = 0.35
+HAND_PRESENCE_CONFIDENCE = 0.35
+HAND_TRACKING_CONFIDENCE = 0.35
+FAR_HAND_DETECTION_CONFIDENCE = 0.24
+FAR_HAND_PRESENCE_CONFIDENCE = 0.24
+FAR_HAND_REFINEMENT_INTERVAL_MS = 90
 GESTURE_HOLD_SECONDS = 1.5

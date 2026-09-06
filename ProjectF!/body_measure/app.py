@@ -20,7 +20,7 @@ from .config import (CAMERA_INDEX, DEFAULT_HEIGHT_CM, DEFAULT_MARKER_CM, FRAME_H
 from .posture import (PostureSampleBuffer, ShoulderSampleBuffer, analyse_front_shoulder_frame,
                       analyse_posture_frame)
 from .state_machine import GestureStateMachine, State
-from .ui import MeasurementUI, show_measurement_summary
+from .ui import MeasurementUI, show_measurement_summary, show_startup_error
 from .utils import (draw_hand_landmarks, draw_pose_landmarks, draw_posture_guides,
                     draw_shoulder_measurement_guides, draw_thai_text, is_peace_sign)
 from .vision import VisionEngine
@@ -31,6 +31,24 @@ class MeasurementPhase(Enum):
 
     FRONT_SHOULDERS = auto()
     SIDE_POSTURE = auto()
+
+
+def _open_camera(video_source: int | str):
+    """Open a Windows webcam with a DirectShow fallback before giving up.
+
+    Some webcams report an empty frame through the default backend while they
+    work through DirectShow.  File/stream sources intentionally keep OpenCV's
+    normal backend.
+    """
+    backends = [cv2.CAP_DSHOW, cv2.CAP_ANY] if isinstance(video_source, int) else [cv2.CAP_ANY]
+    for backend in backends:
+        cap = cv2.VideoCapture(video_source, backend)
+        if cap.isOpened():
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
+            return cap
+        cap.release()
+    return None
 
 
 def _has_full_body(pose_result) -> bool:
@@ -223,12 +241,14 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
     """
     if user_height_cm <= 0 or marker_size_cm < 0:
         raise ValueError("user_height_cm must be positive and marker_size_cm cannot be negative")
-    cap = cv2.VideoCapture(video_source)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-    if not cap.isOpened():
-        cap.release()
-        raise RuntimeError(f"Cannot open camera source {video_source}")
+    cap = _open_camera(video_source)
+    if cap is None:
+        show_startup_error(
+            f"ไม่สามารถเปิดกล้องหมายเลข {video_source} ได้\n\n"
+            "ตรวจสอบว่ากล้องเชื่อมต่ออยู่ อนุญาตสิทธิ์ Camera ใน Windows แล้ว "
+            "และปิดโปรแกรมอื่นที่กำลังใช้กล้อง"
+        )
+        return None
 
     ui = None
     vision = None
@@ -245,6 +265,11 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
         while ui.is_open:
             ok, camera_frame = cap.read()
             if not ok:
+                show_startup_error(
+                    "กล้องเปิดได้ แต่ไม่สามารถรับภาพได้\n\n"
+                    "ลองถอด–เสียบกล้องใหม่ หรือปิดแอปอื่นที่กำลังใช้กล้อง",
+                    parent=ui.root,
+                )
                 break
             # Detect the marker before mirroring; a horizontally flipped
             # ArUco marker no longer decodes as the same ID.
@@ -260,9 +285,9 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
             if pose_result.pose_landmarks:
                 draw_pose_landmarks(frame, pose_result.pose_landmarks[0])
 
-            peace = bool(hand_result.hand_landmarks and is_peace_sign(hand_result.hand_landmarks[0]))
-            if hand_result.hand_landmarks:
-                draw_hand_landmarks(frame, hand_result.hand_landmarks[0])
+            peace = any(is_peace_sign(hand) for hand in hand_result.hand_landmarks)
+            for hand in hand_result.hand_landmarks:
+                draw_hand_landmarks(frame, hand)
 
             state, progress, transitioned = state_machine.update(peace, timestamp)
             if transitioned and state is State.MEASURING:
@@ -277,6 +302,8 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                 status = ("ยืนให้เห็นเต็มตัว หันหน้าตรง แล้วชูสองนิ้วค้างเพื่อเริ่ม"
                           if pose_result.pose_landmarks else
                           "ไม่พบร่างกาย — ยืนในภาพเต็มตัว เพิ่มแสง หรือขยับใกล้ขึ้น")
+                if pose_result.pose_landmarks and hand_result.hand_landmarks and not peace:
+                    status = "ตรวจพบมือแล้ว — ชูนิ้วชี้และนิ้วกลางเป็นรูป V ค้างไว้เพื่อเริ่ม"
                 if peace:
                     status += f" ({progress * GESTURE_HOLD_SECONDS:.1f}/{GESTURE_HOLD_SECONDS:.1f} วินาที)"
             else:
@@ -339,6 +366,13 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                     continue
             draw_thai_text(frame, status, (30, 30), 22, (255, 255, 255))
             ui.show_frame(frame)
+    except (FileNotFoundError, RuntimeError, ValueError, cv2.error) as error:
+        show_startup_error(
+            "ไม่สามารถเริ่มระบบตรวจจับได้\n\n"
+            f"รายละเอียด: {error}\n\n"
+            "ตรวจสอบว่าไฟล์โมเดล .task อยู่ในโฟลเดอร์โครงการ และติดตั้งไลบรารีตาม requirements.txt แล้ว",
+            parent=ui.root if ui is not None else None,
+        )
     finally:
         cap.release()
         if vision is not None:
