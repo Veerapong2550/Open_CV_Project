@@ -21,6 +21,13 @@ class RawHandResult:
 
 
 class VisionGeometryTests(unittest.TestCase):
+    def test_video_timestamp_is_always_strictly_increasing(self):
+        engine = object.__new__(VisionEngine)
+        engine._last_timestamp_ms = -1
+        self.assertEqual(engine._next_timestamp(100), 100)
+        self.assertEqual(engine._next_timestamp(100), 101)
+        self.assertEqual(engine._next_timestamp(99), 102)
+
     def test_crop_hand_points_map_back_to_camera_coordinates(self):
         result = VisionEngine._map_hand_result(
             RawHandResult([[RawPoint(0.25, 0.50)]]), (100, 200, 300, 400), 800, 600,

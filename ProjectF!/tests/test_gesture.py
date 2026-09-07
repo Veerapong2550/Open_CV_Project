@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import unittest
 
 from body_measure.utils import is_peace_sign
+from body_measure.state_machine import GestureStateMachine, State
 
 
 @dataclass
@@ -40,6 +41,20 @@ class GestureTests(unittest.TestCase):
 
     def test_incomplete_landmarks_are_not_a_gesture(self):
         self.assertFalse(is_peace_sign(_hand()[:10]))
+
+    def test_peace_sign_starts_but_cannot_exit_a_measurement(self):
+        machine = GestureStateMachine(hold_seconds=1.5)
+        state, _, transitioned = machine.update(True, 10.0)
+        self.assertEqual(state, State.WAITING)
+        self.assertFalse(transitioned)
+        state, _, transitioned = machine.update(True, 11.5)
+        self.assertEqual(state, State.MEASURING)
+        self.assertTrue(transitioned)
+        machine.update(False, 11.6)
+        machine.update(True, 12.0)
+        state, _, transitioned = machine.update(True, 13.5)
+        self.assertEqual(state, State.MEASURING)
+        self.assertFalse(transitioned)
 
 
 if __name__ == "__main__":

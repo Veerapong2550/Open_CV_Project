@@ -6,11 +6,17 @@ from enum import Enum, auto
 class State(Enum):
     WAITING = auto()
     MEASURING = auto()
-    EXIT = auto()
 
 
 class GestureStateMachine:
-    """A peace sign must be held continuously before a state transition."""
+    """Start a measurement only after a continuously held peace sign.
+
+    The gesture is deliberately a one-way *start* command.  Previously, a
+    second V-sign detected while measuring changed the state to ``EXIT``.  A
+    hand remaining in view, or a false-positive hand detection, could therefore
+    close the application in the middle of a capture.  Closing is now handled
+    only by the window close button, Escape, or ``q``.
+    """
 
     def __init__(self, hold_seconds: float):
         self.state = State.WAITING
@@ -30,8 +36,7 @@ class GestureStateMachine:
             self._awaiting_release = False
             return self.state, 0.0, False
         # One continuous hold is one command.  Requiring a release prevents a
-        # long start gesture from being read as a second "exit" gesture before
-        # the measurement has had time to complete.
+        # long start gesture from being repeatedly handled as a new command.
         if self._awaiting_release:
             return self.state, 1.0, False
         if self._gesture_started is None:
@@ -42,7 +47,10 @@ class GestureStateMachine:
         self._gesture_started = None
         if self.state is State.WAITING:
             self.state = State.MEASURING
-        elif self.state is State.MEASURING:
-            self.state = State.EXIT
+            transitioned = True
+        else:
+            # A V sign during a capture is intentionally ignored.  In
+            # particular it must not make app.run() clear its sample buffers.
+            transitioned = False
         self._awaiting_release = True
-        return self.state, 1.0, True
+        return self.state, 1.0, transitioned

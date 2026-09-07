@@ -114,6 +114,15 @@ class VisionEngine:
         self._last_refined_result: PoseFrameResult | None = None
         self._search_index = 0
         self._last_hand_refine_ms = -FAR_HAND_REFINEMENT_INTERVAL_MS
+        # MediaPipe VIDEO mode rejects equal or decreasing timestamps.  A fast
+        # camera loop can produce two frames in the same millisecond.
+        self._last_timestamp_ms = -1
+
+    def _next_timestamp(self, timestamp_ms: int) -> int:
+        """Return a non-negative timestamp strictly newer than the last one."""
+        timestamp_ms = max(int(timestamp_ms), 0)
+        self._last_timestamp_ms = max(timestamp_ms, self._last_timestamp_ms + 1)
+        return self._last_timestamp_ms
 
     @staticmethod
     def _image(frame: np.ndarray) -> mp.Image:
@@ -388,6 +397,7 @@ class VisionEngine:
 
     def process(self, frame: np.ndarray, timestamp_ms: int) -> tuple[PoseFrameResult, HandFrameResult]:
         """Return pose coordinates plus near/far hand landmarks in camera space."""
+        timestamp_ms = self._next_timestamp(timestamp_ms)
         height, width = frame.shape[:2]
         full_raw = self.pose.detect_for_video(self._image(frame), timestamp_ms)
         full_result = self._map_result(full_raw, (0, 0, width, height), width, height)

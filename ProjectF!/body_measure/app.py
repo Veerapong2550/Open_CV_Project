@@ -11,7 +11,8 @@ import cv2
 from .calibration import get_pixel_scale
 from .capture import save_full_body_capture
 from .config import (CAMERA_INDEX, DEFAULT_HEIGHT_CM, DEFAULT_MARKER_CM, FRAME_HEIGHT,
-                     FRAME_WIDTH, GESTURE_HOLD_SECONDS, MIN_ANALYSIS_BODY_HEIGHT_PX,
+                     FRAME_WIDTH, GESTURE_HOLD_SECONDS, MAX_CONSECUTIVE_CAMERA_READ_FAILURES,
+                     MIN_ANALYSIS_BODY_HEIGHT_PX,
                      MIN_ANALYSIS_BODY_HEIGHT_RATIO, MIN_FRONT_SHOULDER_SPAN_PX,
                      POSTURE_STABLE_SAMPLES, POSTURE_VISIBILITY_THRESHOLD,
                      FRONT_SHOULDER_VISIBILITY_THRESHOLD, FRONT_VIEW_MIN_WIDTH_TO_TORSO,
@@ -262,15 +263,24 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
         phase = MeasurementPhase.FRONT_SHOULDERS
         shoulder_summary = None
         front_capture_path = None
+        camera_read_failures = 0
         while ui.is_open:
             ok, camera_frame = cap.read()
-            if not ok:
+            if not ok or camera_frame is None or camera_frame.size == 0:
+                camera_read_failures += 1
+                # A brief empty frame is common with USB cameras.  Keeping the
+                # loop alive prevents an in-progress measurement from ending
+                # merely because one frame was dropped.
+                if camera_read_failures < MAX_CONSECUTIVE_CAMERA_READ_FAILURES:
+                    time.sleep(0.02)
+                    continue
                 show_startup_error(
-                    "กล้องเปิดได้ แต่ไม่สามารถรับภาพได้\n\n"
+                    "กล้องเปิดได้ แต่ไม่สามารถรับภาพต่อเนื่องได้\n\n"
                     "ลองถอด–เสียบกล้องใหม่ หรือปิดแอปอื่นที่กำลังใช้กล้อง",
                     parent=ui.root,
                 )
                 break
+            camera_read_failures = 0
             # Detect the marker before mirroring; a horizontally flipped
             # ArUco marker no longer decodes as the same ID.
             marker_scale, marker_corners = get_pixel_scale(camera_frame, marker_size_cm)
@@ -296,8 +306,6 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                 shoulder_summary = None
                 phase = MeasurementPhase.FRONT_SHOULDERS
                 front_capture_path = None
-            if state is State.EXIT:
-                break
             if state is State.WAITING:
                 status = ("ยืนให้เห็นเต็มตัว หันหน้าตรง แล้วชูสองนิ้วค้างเพื่อเริ่ม"
                           if pose_result.pose_landmarks else

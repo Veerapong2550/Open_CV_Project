@@ -67,3 +67,7 @@ FAR_HAND_DETECTION_CONFIDENCE = 0.24
 FAR_HAND_PRESENCE_CONFIDENCE = 0.24
 FAR_HAND_REFINEMENT_INTERVAL_MS = 90
 GESTURE_HOLD_SECONDS = 1.5
+# A USB webcam can occasionally return one or two empty frames while it is
+# adjusting exposure or recovering from another app.  Do not end a session on
+# the first such frame.
+MAX_CONSECUTIVE_CAMERA_READ_FAILURES = 60

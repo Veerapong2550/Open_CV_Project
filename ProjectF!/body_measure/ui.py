@@ -404,8 +404,15 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
         root.update_idletasks()
         root.lift()
         root.focus_force()
-        parent.wait_window(root)
-        parent.lift()
+        try:
+            parent.wait_window(root)
+            # The camera window may have been closed while this modal was
+            # visible; lifting a destroyed Tk window would otherwise raise a
+            # TclError and terminate the capture loop unexpectedly.
+            if parent.winfo_exists():
+                parent.lift()
+        except tk.TclError:
+            pass
 
 
 class MeasurementUI:
@@ -427,13 +434,18 @@ class MeasurementUI:
     def show_frame(self, frame: np.ndarray) -> None:
         if not self._open:
             return
-        image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-        image.thumbnail((self.root.winfo_width(), self.root.winfo_height()))
-        photo = ImageTk.PhotoImage(image=image)
-        self.label.configure(image=photo)
-        self.label.image = photo
-        self.root.update_idletasks()
-        self.root.update()
+        try:
+            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            image.thumbnail((max(self.root.winfo_width(), 1), max(self.root.winfo_height(), 1)))
+            photo = ImageTk.PhotoImage(image=image)
+            self.label.configure(image=photo)
+            self.label.image = photo
+            self.root.update_idletasks()
+            self.root.update()
+        except tk.TclError:
+            # Treat a window closed by Windows as a normal user-close rather
+            # than propagating a GUI exception out of the camera loop.
+            self._open = False
 
     def close(self) -> None:
         self._open = False
