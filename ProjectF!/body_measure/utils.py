@@ -123,8 +123,9 @@ _font_cache: dict[int, ImageFont.FreeTypeFont] = {}
 
 
 def draw_thai_text(frame: np.ndarray, text: str, pos: tuple[int, int], size: int = 24,
-                   color: tuple[int, int, int] = (255, 255, 255)) -> None:
-    """Draw Thai text using Tahoma when available, otherwise Pillow's default."""
+                   color: tuple[int, int, int] = (255, 255, 255),
+                   background: tuple[int, int, int] | None = (18, 24, 30)) -> None:
+    """Draw readable Thai camera-overlay text with an optional dark backing."""
     font = _font_cache.get(size)
     if font is None:
         try:
@@ -133,5 +134,15 @@ def draw_thai_text(frame: np.ndarray, text: str, pos: tuple[int, int], size: int
             font = ImageFont.load_default()
         _font_cache[size] = font
     image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-    ImageDraw.Draw(image).text(pos, text, font=font, fill=(color[2], color[1], color[0]))
+    draw = ImageDraw.Draw(image)
+    if background is not None:
+        left, top = pos
+        box = draw.textbbox(pos, text, font=font)
+        padding = max(5, size // 5)
+        draw.rounded_rectangle(
+            (left - padding, top - padding, box[2] + padding, box[3] + padding),
+            radius=padding,
+            fill=(background[2], background[1], background[0]),
+        )
+    draw.text(pos, text, font=font, fill=(color[2], color[1], color[0]))
     np.copyto(frame, cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR))

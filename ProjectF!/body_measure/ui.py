@@ -41,6 +41,16 @@ def show_startup_error(message: str, parent: tk.Misc | None = None) -> None:
                 pass
 
 
+def show_phase_instruction(message: str, parent: tk.Misc | None = None) -> None:
+    """Stop briefly between the two views so the next required pose is clear."""
+    try:
+        messagebox.showinfo("เปลี่ยนท่าสำหรับวัด", message, parent=parent)
+    except tk.TclError:
+        # The camera overlay retains the same instruction if a modal dialog is
+        # unavailable (for example, while Windows is changing displays).
+        print(f"ขั้นตอนถัดไป: {message}")
+
+
 def _status_style(level: str) -> dict[str, str]:
     """Give every screening level a label as well as a distinct colour."""
     styles = {
@@ -375,48 +385,73 @@ def _scrollable_panel(root: tk.Misc) -> tk.Frame:
 
 def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -> None:
     """Show a modal result screen, returning to the camera when it is closed."""
-    root = tk.Tk() if parent is None else tk.Toplevel(parent)
-    root.title("ผลคัดกรองท่าทาง")
-    root.geometry("900x780")
-    root.minsize(760, 620)
-    root.configure(bg=BACKGROUND)
-    if parent is not None:
-        root.transient(parent)
-        root.grab_set()
-        root.attributes("-topmost", True)
+    root: tk.Misc | None = None
+    try:
+        root = tk.Tk() if parent is None else tk.Toplevel(parent)
+        root.title("ผลคัดกรองท่าทาง")
+        root.geometry("900x780")
+        root.minsize(760, 620)
+        root.configure(bg=BACKGROUND)
+        if parent is not None:
+            root.transient(parent)
+            root.grab_set()
+            root.attributes("-topmost", True)
 
-    panel = _scrollable_panel(root)
-    posture = measurement.get("posture")
-    if posture:
-        _build_posture_summary(panel, measurement, posture)
-    else:
-        _build_legacy_summary(panel, measurement)
+        panel = _scrollable_panel(root)
+        posture = measurement.get("posture")
+        if posture:
+            _build_posture_summary(panel, measurement, posture)
+        else:
+            _build_legacy_summary(panel, measurement)
 
-    close = tk.Button(panel, text="วัดอีกครั้ง", command=root.destroy, font=("Tahoma", 11, "bold"),
-                      bg="#2c7be5", fg="white", activebackground="#1f64c0", relief=tk.FLAT,
-                      padx=28, pady=8, cursor="hand2")
-    close.pack(anchor=tk.E, pady=(16, 0))
-    root.bind("<Escape>", lambda _event: root.destroy())
-    root.protocol("WM_DELETE_WINDOW", root.destroy)
-    if parent is None:
-        root.mainloop()
-    else:
-        root.update_idletasks()
-        root.lift()
-        root.focus_force()
-        try:
+        close = tk.Button(panel, text="วัดอีกครั้ง", command=root.destroy, font=("Tahoma", 11, "bold"),
+                          bg="#2c7be5", fg="white", activebackground="#1f64c0", relief=tk.FLAT,
+                          padx=28, pady=8, cursor="hand2")
+        close.pack(anchor=tk.E, pady=(16, 0))
+        root.bind("<Escape>", lambda _event: root.destroy())
+        root.protocol("WM_DELETE_WINDOW", root.destroy)
+        if parent is None:
+            root.mainloop()
+        else:
+            root.update_idletasks()
+            root.lift()
             parent.wait_window(root)
             # The camera window may have been closed while this modal was
             # visible; lifting a destroyed Tk window would otherwise raise a
             # TclError and terminate the capture loop unexpectedly.
             if parent.winfo_exists():
                 parent.lift()
+    except tk.TclError as error:
+        # Do not let a window-manager focus/display problem discard a valid
+        # measurement.  The numerical summary remains visible in a standard
+        # dialog, and in the terminal when Tk is unavailable.
+        posture = measurement.get("posture", {})
+        text = (
+            "วัดเสร็จแล้ว แต่เปิดหน้าสรุปรายละเอียดไม่ได้\n\n"
+            f"ผลคัดกรอง: {posture.get('screening_label', 'โปรดตรวจผลใหม่')}\n"
+            f"ศีรษะเทียบไหล่: {posture.get('head_shoulder_offset_ratio', 0) * 100:.1f}%\n"
+            f"ไหล่เทียบสะโพก: {posture.get('shoulder_hip_offset_ratio', 0) * 100:.1f}%\n"
+            f"ลำตัวเอียง: {posture.get('trunk_inclination_deg', 0):.1f}°\n\n"
+            f"รายละเอียดหน้าต่าง: {error}"
+        )
+        print(text)
+        try:
+            messagebox.showinfo("ผลการวัด", text, parent=parent)
         except tk.TclError:
             pass
+    finally:
+        if root is not None:
+            try:
+                if root.winfo_exists():
+                    root.grab_release()
+                    root.destroy()
+            except tk.TclError:
+                pass
 
 
 class MeasurementUI:
     def __init__(self, window_title: str, window_size: tuple[int, int]):
+        self._window_size = window_size
         self.root = tk.Tk()
         self.root.title(window_title)
         self.root.geometry(f"{window_size[0]}x{window_size[1]}")
@@ -430,6 +465,17 @@ class MeasurementUI:
     @property
     def is_open(self) -> bool:
         return self._open
+
+    def overlay_scale(self, frame: np.ndarray) -> float:
+        """Scale camera-overlay text so it stays readable after preview resize."""
+        width = self.root.winfo_width()
+        height = self.root.winfo_height()
+        # Tk reports 1x1 before its first paint; use the requested window size
+        # for that first frame rather than producing an enormous overlay.
+        if width < 100 or height < 100:
+            width, height = self._window_size
+        frame_height, frame_width = frame.shape[:2]
+        return max(1.0, frame_width / width, frame_height / height)
 
     def show_frame(self, frame: np.ndarray) -> None:
         if not self._open:

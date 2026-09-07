@@ -21,7 +21,8 @@ from .config import (CAMERA_INDEX, DEFAULT_HEIGHT_CM, DEFAULT_MARKER_CM, FRAME_H
 from .posture import (PostureSampleBuffer, ShoulderSampleBuffer, analyse_front_shoulder_frame,
                       analyse_posture_frame)
 from .state_machine import GestureStateMachine, State
-from .ui import MeasurementUI, show_measurement_summary, show_startup_error
+from .ui import (MeasurementUI, show_measurement_summary, show_phase_instruction,
+                 show_startup_error)
 from .utils import (draw_hand_landmarks, draw_pose_landmarks, draw_posture_guides,
                     draw_shoulder_measurement_guides, draw_thai_text, is_peace_sign)
 from .vision import VisionEngine
@@ -32,6 +33,19 @@ class MeasurementPhase(Enum):
 
     FRONT_SHOULDERS = auto()
     SIDE_POSTURE = auto()
+
+
+def _draw_overlay(ui: MeasurementUI, frame, text: str, pos: tuple[int, int], size: int,
+                  color: tuple[int, int, int]) -> None:
+    """Keep labels the same visual size after a high-resolution frame is shrunk."""
+    scale = ui.overlay_scale(frame)
+    draw_thai_text(
+        frame,
+        text,
+        (round(pos[0] * scale), round(pos[1] * scale)),
+        max(1, round(size * scale)),
+        color,
+    )
 
 
 def _open_camera(video_source: int | str):
@@ -330,6 +344,15 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                         shoulder_summary = completed_shoulders
                         posture_samples.clear()
                         phase = MeasurementPhase.SIDE_POSTURE
+                        # This was previously only a one-line camera overlay.
+                        # People could reasonably expect a result here and not
+                        # realise that the second (side) view was still needed.
+                        show_phase_instruction(
+                            "บันทึกภาพหน้าตรงแล้ว\n\n"
+                            "หันลำตัวด้านข้างให้เห็นหู ไหล่ สะโพก และข้อเท้า "
+                            "จากนั้นยืนนิ่งเพื่อเก็บผลขั้นที่ 2/2",
+                            parent=ui.root,
+                        )
                 else:
                     if shoulder_summary is None:
                         # This should be unreachable, but prevents a partial
@@ -343,14 +366,14 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                             posture_samples, shoulder_summary)
                 if live_values:
                     if live_values["view"] == "front_shoulders":
-                        draw_thai_text(frame, f"ไหล่ซ้าย: {live_values['left_ratio'] * 100:.1f}% ของช่วงไหล่ | ไหล่ขวา: {live_values['right_ratio'] * 100:.1f}%", (30, 70), 20, (0, 255, 255))
-                        draw_thai_text(frame, f"ส่วนต่างในภาพ: {live_values['difference_ratio'] * 100:.1f}% | เก็บข้อมูล {live_values['progress'] * 100:.0f}%", (30, 101), 20, (0, 255, 255))
+                        _draw_overlay(ui, frame, f"ไหล่ซ้าย: {live_values['left_ratio'] * 100:.1f}% ของช่วงไหล่ | ไหล่ขวา: {live_values['right_ratio'] * 100:.1f}%", (30, 70), 20, (0, 255, 255))
+                        _draw_overlay(ui, frame, f"ส่วนต่างในภาพ: {live_values['difference_ratio'] * 100:.1f}% | เก็บข้อมูล {live_values['progress'] * 100:.0f}%", (30, 101), 20, (0, 255, 255))
                     elif live_values["view"] == "side":
-                        draw_thai_text(frame, f"ศีรษะ–ไหล่: {live_values['head_ratio'] * 100:.1f}% ของลำตัว", (30, 70), 23, (0, 255, 255))
-                        draw_thai_text(frame, f"ไหล่–สะโพก: {live_values['shoulder_ratio'] * 100:.1f}% | เอียงลำตัว: {live_values['trunk_angle']:.1f}°", (30, 103), 21, (0, 255, 255))
-                        draw_thai_text(frame, f"รายละเอียดร่างกาย: {live_values['body_height_px']:.0f}px | เก็บข้อมูล {live_values['progress'] * 100:.0f}%", (30, 133), 19, (0, 255, 255))
+                        _draw_overlay(ui, frame, f"ศีรษะ–ไหล่: {live_values['head_ratio'] * 100:.1f}% ของลำตัว", (30, 70), 23, (0, 255, 255))
+                        _draw_overlay(ui, frame, f"ไหล่–สะโพก: {live_values['shoulder_ratio'] * 100:.1f}% | เอียงลำตัว: {live_values['trunk_angle']:.1f}°", (30, 103), 21, (0, 255, 255))
+                        _draw_overlay(ui, frame, f"รายละเอียดร่างกาย: {live_values['body_height_px']:.0f}px | เก็บข้อมูล {live_values['progress'] * 100:.0f}%", (30, 133), 19, (0, 255, 255))
                     else:
-                        draw_thai_text(frame, f"ภาพหน้า: ไหล่เอียง {live_values['shoulder_tilt_deg']:.1f}° | สะโพกเอียง {live_values['hip_tilt_deg']:.1f}°", (30, 70), 21, (0, 255, 255))
+                        _draw_overlay(ui, frame, f"ภาพหน้า: ไหล่เอียง {live_values['shoulder_tilt_deg']:.1f}° | สะโพกเอียง {live_values['hip_tilt_deg']:.1f}°", (30, 70), 21, (0, 255, 255))
                 if new_measurement:
                     # The final side frame has likewise passed every posture
                     # quality and stability gate.  Save it before presenting
@@ -372,7 +395,7 @@ def run(user_height_cm: float = DEFAULT_HEIGHT_CM, marker_size_cm: float = DEFAU
                     state_machine.reset()
                     front_capture_path = None
                     continue
-            draw_thai_text(frame, status, (30, 30), 22, (255, 255, 255))
+            _draw_overlay(ui, frame, status, (30, 30), 22, (255, 255, 255))
             ui.show_frame(frame)
     except (FileNotFoundError, RuntimeError, ValueError, cv2.error) as error:
         show_startup_error(
