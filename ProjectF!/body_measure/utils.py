@@ -11,20 +11,80 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
+class OneEuroFilter:
+    """Small, dependency-free One Euro filter for a scalar signal.
+
+    Formula from spec:
+        alpha = dt / (dt + tau), tau = 1 / (2 * pi * fc), fc = min_cutoff + beta * |dx|
+    """
+
+    def __init__(self, timestamp: float, value: float, min_cutoff: float = 0.3,
+                 beta: float = 0.01, derivative_cutoff: float = 1.0):
+        self.min_cutoff = float(min_cutoff)
+        self.beta = float(beta)
+        self.derivative_cutoff = float(derivative_cutoff)
+        self.value = float(value)
+        self.derivative = 0.0
+        self.timestamp = float(timestamp)
+
+    @staticmethod
+    def _alpha(cutoff: float, dt: float) -> float:
+        tau = 1.0 / (2.0 * math.pi * cutoff)
+        return dt / (dt + tau)
+
+    def update(self, timestamp: float, value: float) -> float:
+        dt = timestamp - self.timestamp
+        if dt <= 0:
+            return self.value
+        raw_derivative = (value - self.value) / dt
+        derivative_alpha = self._alpha(self.derivative_cutoff, dt)
+        self.derivative = derivative_alpha * raw_derivative + (1 - derivative_alpha) * self.derivative
+        value_alpha = self._alpha(self.min_cutoff + self.beta * abs(self.derivative), dt)
+        self.value = value_alpha * value + (1 - value_alpha) * self.value
+        self.timestamp = timestamp
+        return self.value
+
+
+class PointSmoother:
+    """Filters 2D coordinate streams using OneEuroFilter for X and Y."""
+
+    def __init__(self, min_cutoff: float = 0.3, beta: float = 0.01):
+        self.min_cutoff = min_cutoff
+        self.beta = beta
+        self._filters: dict[str, tuple[OneEuroFilter, OneEuroFilter]] = {}
+
+    def clear(self) -> None:
+        self._filters.clear()
+
+    def update(self, name: str, timestamp: float, x: float, y: float) -> tuple[float, float]:
+        if name not in self._filters:
+            self._filters[name] = (
+                OneEuroFilter(timestamp, x, min_cutoff=self.min_cutoff, beta=self.beta),
+                OneEuroFilter(timestamp, y, min_cutoff=self.min_cutoff, beta=self.beta),
+            )
+            return x, y
+        x_filter, y_filter = self._filters[name]
+        return x_filter.update(timestamp, x), y_filter.update(timestamp, y)
+
+
 HAND_CONNECTIONS = ((0, 1), (0, 5), (5, 9), (9, 13), (13, 17), (0, 17),
                     (1, 2), (2, 3), (3, 4), (5, 6), (6, 7), (7, 8),
                     (9, 10), (10, 11), (11, 12), (13, 14), (14, 15), (15, 16),
                     (17, 18), (18, 19), (19, 20))
 
-# MediaPipe Pose's 33 landmark topology.  Keeping this locally avoids relying
-# on private drawing helpers and makes the camera feedback visible at all
-# times, not only once a measurement becomes valid.
+# Facial landmarks not needed for body posture & measurement (0..10: nose, eyes, ears, mouth)
+# Complete exclusion leaves the user's face 100% clean with zero points and zero lines.
+UNUSED_FACE_LANDMARKS = frozenset(range(11))
+
+# MediaPipe Pose landmark topology excluding all facial mesh lines and finger/toe clutter.
+# Focused strictly on the spine, torso, and main limb segments for posture analysis.
 POSE_CONNECTIONS = (
-    (0, 1), (1, 2), (2, 3), (3, 7), (0, 4), (4, 5), (5, 6), (6, 8),
-    (9, 10), (11, 12), (11, 13), (13, 15), (15, 17), (15, 19), (15, 21),
-    (17, 19), (12, 14), (14, 16), (16, 18), (16, 20), (16, 22), (18, 20),
-    (11, 23), (12, 24), (23, 24), (23, 25), (24, 26), (25, 27), (26, 28),
-    (27, 29), (28, 30), (29, 31), (30, 32), (27, 31), (28, 32),
+    # Shoulders and Torso
+    (11, 12), (11, 23), (12, 24), (23, 24),
+    # Arms
+    (11, 13), (13, 15), (12, 14), (14, 16),
+    # Legs
+    (23, 25), (24, 26), (25, 27), (26, 28),
 )
 
 
@@ -76,16 +136,18 @@ def draw_hand_landmarks(frame: np.ndarray, landmarks: Iterable) -> None:
 
 
 def draw_pose_landmarks(frame: np.ndarray, landmarks: Iterable, min_visibility: float = 0.25) -> None:
-    """Overlay the detected pose, including when the app is waiting to start."""
+    """Overlay the detected pose, excluding unnecessary facial landmarks (eyes, mouth)."""
     height, width = frame.shape[:2]
     points = list(landmarks)
     visible = [getattr(point, "visibility", 1.0) >= min_visibility for point in points]
     pixels = [(int(point.x * width), int(point.y * height)) for point in points]
     for start, end in POSE_CONNECTIONS:
-        if start < len(visible) and end < len(visible) and visible[start] and visible[end]:
+        if (start not in UNUSED_FACE_LANDMARKS and end not in UNUSED_FACE_LANDMARKS
+                and start < len(visible) and end < len(visible)
+                and visible[start] and visible[end]):
             cv2.line(frame, pixels[start], pixels[end], (255, 180, 0), 2, cv2.LINE_AA)
-    for point, is_visible in zip(pixels, visible):
-        if is_visible:
+    for idx, (point, is_visible) in enumerate(zip(pixels, visible)):
+        if is_visible and idx not in UNUSED_FACE_LANDMARKS:
             cv2.circle(frame, point, 3, (0, 220, 255), -1, cv2.LINE_AA)
 
 
@@ -120,12 +182,16 @@ def draw_shoulder_measurement_guides(frame: np.ndarray,
 
 
 _font_cache: dict[int, ImageFont.FreeTypeFont] = {}
+_dummy_img = Image.new("RGB", (1, 1))
+_dummy_draw = ImageDraw.Draw(_dummy_img)
 
 
 def draw_thai_text(frame: np.ndarray, text: str, pos: tuple[int, int], size: int = 24,
                    color: tuple[int, int, int] = (255, 255, 255),
                    background: tuple[int, int, int] | None = (18, 24, 30)) -> None:
-    """Draw readable Thai camera-overlay text with an optional dark backing."""
+    """Draw readable Thai camera-overlay text using ROI-only processing for high FPS."""
+    if not text:
+        return
     font = _font_cache.get(size)
     if font is None:
         try:
@@ -133,16 +199,32 @@ def draw_thai_text(frame: np.ndarray, text: str, pos: tuple[int, int], size: int
         except OSError:
             font = ImageFont.load_default()
         _font_cache[size] = font
-    image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+
+    box = _dummy_draw.textbbox(pos, text, font=font)
+    padding = max(5, size // 5) if background is not None else 0
+
+    frame_h, frame_w = frame.shape[:2]
+    x1 = max(0, box[0] - padding)
+    y1 = max(0, box[1] - padding)
+    x2 = min(frame_w, box[2] + padding)
+    y2 = min(frame_h, box[3] + padding)
+
+    if x2 <= x1 or y2 <= y1:
+        return
+
+    # Process only the small sub-region containing the text
+    roi = frame[y1:y2, x1:x2]
+    image = Image.fromarray(cv2.cvtColor(roi, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(image)
+
+    rel_pos = (pos[0] - x1, pos[1] - y1)
     if background is not None:
-        left, top = pos
-        box = draw.textbbox(pos, text, font=font)
-        padding = max(5, size // 5)
+        rel_box = (box[0] - x1, box[1] - y1, box[2] - x1, box[3] - y1)
         draw.rounded_rectangle(
-            (left - padding, top - padding, box[2] + padding, box[3] + padding),
+            (rel_box[0] - padding, rel_box[1] - padding, rel_box[2] + padding, rel_box[3] + padding),
             radius=padding,
             fill=(background[2], background[1], background[0]),
         )
-    draw.text(pos, text, font=font, fill=(color[2], color[1], color[0]))
-    np.copyto(frame, cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR))
+    draw.text(rel_pos, text, font=font, fill=(color[2], color[1], color[0]))
+    frame[y1:y2, x1:x2] = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
+

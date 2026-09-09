@@ -54,5 +54,31 @@ class VisionGeometryTests(unittest.TestCase):
         self.assertLessEqual(bottom, 720)
 
 
+    def test_face_detail_landmarks_excluded_from_connections_and_drawing(self):
+        import numpy as np
+        from body_measure.utils import POSE_CONNECTIONS, UNUSED_FACE_LANDMARKS, draw_pose_landmarks
+
+        # Verify all facial landmarks (0..10: nose, eyes, ears, mouth) are in UNUSED_FACE_LANDMARKS
+        self.assertEqual(UNUSED_FACE_LANDMARKS, frozenset(range(11)))
+
+        # Verify NO facial landmarks are in any POSE_CONNECTIONS
+        for start, end in POSE_CONNECTIONS:
+            self.assertNotIn(start, UNUSED_FACE_LANDMARKS, f"Landmark {start} should not be in POSE_CONNECTIONS")
+            self.assertNotIn(end, UNUSED_FACE_LANDMARKS, f"Landmark {end} should not be in POSE_CONNECTIONS")
+
+        # Verify drawing executes cleanly without error and ignores face points
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        landmarks = [PoseLandmark(0.5, 0.5, visibility=0.99) for _ in range(33)]
+        draw_pose_landmarks(frame, landmarks)
+        # Check that body canvas was drawn on
+        self.assertGreater(frame.sum(), 0)
+
+        # Check that if ONLY face landmarks are visible, nothing is drawn on canvas
+        face_only_frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        face_only_landmarks = [PoseLandmark(0.5, 0.5, visibility=0.99 if i < 11 else 0.0) for i in range(33)]
+        draw_pose_landmarks(face_only_frame, face_only_landmarks)
+        self.assertEqual(face_only_frame.sum(), 0, "No drawing should occur for face-only landmarks")
+
+
 if __name__ == "__main__":
     unittest.main()

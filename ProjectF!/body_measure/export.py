@@ -14,13 +14,16 @@ def save_measurement_to_excel(measurement: dict, output_path: str | Path) -> Pat
     except ImportError as exc:
         raise RuntimeError("Excel export requires pandas and openpyxl") from exc
     path = Path(output_path).with_suffix(".xlsx")
-    posture = measurement.get("posture", {})
-    shoulders = measurement.get("shoulders", {})
+    path.parent.mkdir(parents=True, exist_ok=True)
+    posture = measurement.get("posture") or {}
+    shoulders = measurement.get("shoulders") or {}
     row = {
         "Measured At": measurement.get("measured_at"),
         "Input Height (cm)": measurement.get("input_height_cm"),
         "Calibration": measurement.get("calibration"),
         "Stable Samples": measurement.get("samples_used"),
+        "Front Capture Image": measurement.get("front_capture_file"),
+        "Side Capture Image": measurement.get("side_capture_file", measurement.get("capture_file")),
         "Shoulder Width (cm; front view only)": measurement.get("shoulder_cm"),
         "Left Shoulder Length (cm; front view)": measurement.get("left_shoulder_cm"),
         "Right Shoulder Length (cm; front view)": measurement.get("right_shoulder_cm"),
@@ -35,6 +38,8 @@ def save_measurement_to_excel(measurement: dict, output_path: str | Path) -> Pat
         "Shoulder Tilt (deg; front view)": shoulders.get("shoulder_tilt_deg"),
         "Posture Screening Level": posture.get("screening_level"),
         "Posture Screening Score (0-6)": posture.get("screening_score"),
+        "Posture Screening Description": posture.get("screening_label"),
+        "Torso Length (cm)": posture.get("torso_cm"),
         "Head-Shoulder Offset (% torso)": _percent(posture.get("head_shoulder_offset_ratio")),
         "Shoulder-Hip Offset (% torso)": _percent(posture.get("shoulder_hip_offset_ratio")),
         "Hip-Ankle Offset (% torso)": _percent(posture.get("hip_ankle_offset_ratio")),
@@ -42,8 +47,8 @@ def save_measurement_to_excel(measurement: dict, output_path: str | Path) -> Pat
         "Trunk Inclination (deg)": posture.get("trunk_inclination_deg"),
         "Lower-body Inclination (deg)": posture.get("lower_body_inclination_deg"),
         "Ear-Shoulder-Hip Angle (deg)": posture.get("ear_shoulder_hip_angle"),
-        "Head-Shoulder Offset (cm; ArUco only)": posture.get("head_shoulder_offset_cm"),
-        "Shoulder-Hip Offset (cm; ArUco only)": posture.get("shoulder_hip_offset_cm"),
+        "Head-Shoulder Offset (cm)": posture.get("head_shoulder_offset_cm"),
+        "Shoulder-Hip Offset (cm)": posture.get("shoulder_hip_offset_cm"),
         "Landmark Confidence": posture.get("landmark_confidence"),
         "Frame Stability": posture.get("stable"),
     }

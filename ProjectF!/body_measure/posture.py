@@ -199,8 +199,9 @@ def analyse_posture_frame(landmarks: Sequence[object], frame_width: int, frame_h
     hip = _centroid(landmarks, (LEFT_HIP, RIGHT_HIP), frame_width, frame_height, min_visibility)
     ankle = _centroid(landmarks, (LEFT_ANKLE, RIGHT_ANKLE), frame_width, frame_height, min_visibility)
     nose = _centroid(landmarks, (NOSE,), frame_width, frame_height, min_visibility)
-    if not all((ear, shoulder, hip, ankle, nose)):
-        return None, "ให้เห็นหู ไหล่ สะโพก และข้อเท้าชัดเจน"
+    head = ear if ear is not None else nose
+    if not all((head, shoulder, hip, ankle)):
+        return None, "ให้เห็นศีรษะ ไหล่ สะโพก และข้อเท้าชัดเจน"
 
     torso_px = math.dist(shoulder, hip)
     if torso_px < 20.0:
@@ -209,13 +210,18 @@ def analyse_posture_frame(landmarks: Sequence[object], frame_width: int, frame_h
     shoulder_span = _pair_span(landmarks, LEFT_SHOULDER, RIGHT_SHOULDER, frame_width, frame_height,
                                 min_visibility)
     hip_span = _pair_span(landmarks, LEFT_HIP, RIGHT_HIP, frame_width, frame_height, min_visibility)
-    if shoulder_span is None or hip_span is None:
-        return None, "ให้เห็นไหล่และสะโพกทั้งสองข้าง"
-    projected_width_ratio = (shoulder_span + hip_span) / (2.0 * torso_px)
+    if shoulder_span is not None and hip_span is not None:
+        projected_width_ratio = (shoulder_span + hip_span) / (2.0 * torso_px)
+    elif shoulder_span is not None:
+        projected_width_ratio = shoulder_span / torso_px
+    elif hip_span is not None:
+        projected_width_ratio = hip_span / torso_px
+    else:
+        projected_width_ratio = 0.0
 
     # Use the largest vertical extent of the landmarks that matter to the
     # screen; it is a direct proxy for available image detail at any distance.
-    key_points = (ear, shoulder, hip, ankle)
+    key_points = (head, shoulder, hip, ankle)
     body_height_px = max(point[1] for point in key_points) - min(point[1] for point in key_points)
     confidences = []
     for index in (NOSE, LEFT_EAR, RIGHT_EAR, LEFT_SHOULDER, RIGHT_SHOULDER,
@@ -230,43 +236,44 @@ def analyse_posture_frame(landmarks: Sequence[object], frame_width: int, frame_h
         "torso_px": float(torso_px),
         "view_width_to_torso_ratio": float(projected_width_ratio),
         "landmark_confidence": confidence,
-        "points": {"ear": ear, "shoulder": shoulder, "hip": hip, "ankle": ankle, "nose": nose},
+        "points": {"ear": head, "head": head, "shoulder": shoulder, "hip": hip, "ankle": ankle, "nose": nose or head},
     }
 
     if projected_width_ratio > side_view_max_width_to_torso:
         shoulder_tilt = math.degrees(math.atan2(
             abs(_point(landmarks[RIGHT_SHOULDER], frame_width, frame_height)[1]
                 - _point(landmarks[LEFT_SHOULDER], frame_width, frame_height)[1]),
-            max(shoulder_span, 1e-6),
+            max(shoulder_span or 1.0, 1e-6),
         ))
         hip_tilt = math.degrees(math.atan2(
             abs(_point(landmarks[RIGHT_HIP], frame_width, frame_height)[1]
                 - _point(landmarks[LEFT_HIP], frame_width, frame_height)[1]),
-            max(hip_span, 1e-6),
+            max(hip_span or 1.0, 1e-6),
         ))
+        head_x = head[0]
         common.update({
             "view": "front",
             "shoulder_tilt_deg": shoulder_tilt,
             "hip_tilt_deg": hip_tilt,
-            "head_lateral_offset_ratio": abs(nose[0] - shoulder[0]) / max(shoulder_span, 1e-6),
+            "head_lateral_offset_ratio": abs(head_x - shoulder[0]) / max(shoulder_span or 1.0, 1e-6),
         })
         return common, "ภาพด้านหน้าใช้ดูระดับไหล่ได้ แต่ยังประเมินหลังค่อมไม่ได้ — กรุณาหันด้านข้าง"
 
-    ear_dx = ear[0] - shoulder[0]
+    head_dx = head[0] - shoulder[0]
     shoulder_dx = shoulder[0] - hip[0]
     # An exact zero is neutral rather than a direction conflict.
-    same_side_chain = float(ear_dx * shoulder_dx >= 0.0)
+    same_side_chain = float(head_dx * shoulder_dx >= 0.0)
     metrics = {
         **common,
         "view": "side",
-        "head_shoulder_offset_ratio": abs(ear_dx) / torso_px,
+        "head_shoulder_offset_ratio": abs(head_dx) / torso_px,
         "shoulder_hip_offset_ratio": abs(shoulder_dx) / torso_px,
-        "ear_hip_offset_ratio": abs(ear[0] - hip[0]) / torso_px,
+        "ear_hip_offset_ratio": abs(head[0] - hip[0]) / torso_px,
         "hip_ankle_offset_ratio": abs(hip[0] - ankle[0]) / torso_px,
-        "neck_inclination_deg": _angle_from_vertical(ear, shoulder),
+        "neck_inclination_deg": _angle_from_vertical(head, shoulder),
         "trunk_inclination_deg": _angle_from_vertical(shoulder, hip),
         "lower_body_inclination_deg": _angle_from_vertical(hip, ankle),
-        "ear_shoulder_hip_angle": _joint_angle(ear, shoulder, hip),
+        "ear_shoulder_hip_angle": _joint_angle(head, shoulder, hip),
         "same_side_chain": same_side_chain,
     }
     metrics.update(classify_profile(metrics))
@@ -276,7 +283,9 @@ def analyse_posture_frame(landmarks: Sequence[object], frame_width: int, frame_h
 def analyse_front_shoulder_frame(landmarks: Sequence[object], frame_width: int, frame_height: int,
                                  min_visibility: float = 0.55,
                                  front_view_min_width_to_torso: float = 0.72,
-                                 min_shoulder_span_px: float = 60.0) -> tuple[dict | None, str]:
+                                 min_shoulder_span_px: float = 60.0,
+                                 max_shoulder_tilt_deg: float = 5.0,
+                                 max_centering_offset_ratio: float = 0.10) -> tuple[dict | None, str]:
     """Measure projected left/right shoulder lengths from a front-facing frame.
 
     Each length runs from a repeatable torso-midline proxy to the corresponding
@@ -289,12 +298,14 @@ def analyse_front_shoulder_frame(landmarks: Sequence[object], frame_width: int, 
         return None, "ไม่พบจุดร่างกายครบถ้วน"
 
     ears = _centroid(landmarks, (LEFT_EAR, RIGHT_EAR), frame_width, frame_height, min_visibility)
+    nose = _centroid(landmarks, (NOSE,), frame_width, frame_height, min_visibility)
     left_shoulder = _centroid(landmarks, (LEFT_SHOULDER,), frame_width, frame_height, min_visibility)
     right_shoulder = _centroid(landmarks, (RIGHT_SHOULDER,), frame_width, frame_height, min_visibility)
     hip = _centroid(landmarks, (LEFT_HIP, RIGHT_HIP), frame_width, frame_height, min_visibility)
     ankle = _centroid(landmarks, (LEFT_ANKLE, RIGHT_ANKLE), frame_width, frame_height, min_visibility)
-    if not all((ears, left_shoulder, right_shoulder, hip, ankle)):
-        return None, "ให้เห็นหู ไหล่ สะโพก และข้อเท้าชัดเจน"
+    head_top = ears if ears is not None else nose
+    if not all((left_shoulder, right_shoulder, hip, ankle)) or head_top is None:
+        return None, "ให้เห็นศีรษะ ไหล่ สะโพก และข้อเท้าชัดเจน"
 
     shoulder_span_px = math.dist(left_shoulder, right_shoulder)
     torso_px = math.dist(((left_shoulder[0] + right_shoulder[0]) / 2.0,
@@ -312,17 +323,26 @@ def analyse_front_shoulder_frame(landmarks: Sequence[object], frame_width: int, 
             or hip_width_to_torso_ratio < front_view_min_width_to_torso * 0.75):
         return None, "หันหน้าตรงเข้ากล้องให้ไหล่ทั้งสองข้างเห็นชัด เพื่อวัดไหล่ซ้าย–ขวา"
 
-    torso_midline_proxy = _segment_line_intersection(left_shoulder, right_shoulder, ears, hip)
+    shoulder_center_x = (left_shoulder[0] + right_shoulder[0]) / 2.0
+    centering_offset_ratio = abs(shoulder_center_x - frame_width / 2.0) / frame_width
+    if centering_offset_ratio > max_centering_offset_ratio:
+        return None, "กรุณายืนกึ่งกลางภาพ (ห่างจุดกึ่งกลางไม่เกิน 10% ของความกว้างหน้าจอ)"
+
+    shoulder_tilt_deg = math.degrees(math.atan2(
+        abs(right_shoulder[1] - left_shoulder[1]), max(shoulder_span_px, 1e-6),
+    ))
+    if shoulder_tilt_deg > max_shoulder_tilt_deg:
+        return None, f"ระดับไหล่เอียงเกินกำหนด ({shoulder_tilt_deg:.1f}°; ต้องไม่เกิน {max_shoulder_tilt_deg:.1f}°) — ปรับระดับไหล่ให้ตรง"
+
+    torso_midline_proxy = _segment_line_intersection(left_shoulder, right_shoulder, head_top, hip)
     if torso_midline_proxy is None:
         return None, "แนวกึ่งกลางลำตัวยังไม่ชัด — ยืนตรงและหันหน้าตรงเข้ากล้อง"
     left_length_px = math.dist(left_shoulder, torso_midline_proxy)
     right_length_px = math.dist(right_shoulder, torso_midline_proxy)
     asymmetry_ratio = abs(left_length_px - right_length_px) / shoulder_span_px
-    shoulder_tilt_deg = math.degrees(math.atan2(
-        abs(right_shoulder[1] - left_shoulder[1]), max(shoulder_span_px, 1e-6),
-    ))
-    body_height_px = max(ears[1], ankle[1]) - min(ears[1], ankle[1])
-    confidence_indexes = (LEFT_EAR, RIGHT_EAR, LEFT_SHOULDER, RIGHT_SHOULDER,
+    top_y = min(p[1] for p in (ears, nose) if p is not None)
+    body_height_px = max(top_y, ankle[1]) - min(top_y, ankle[1])
+    confidence_indexes = (NOSE, LEFT_EAR, RIGHT_EAR, LEFT_SHOULDER, RIGHT_SHOULDER,
                           LEFT_HIP, RIGHT_HIP, LEFT_ANKLE, RIGHT_ANKLE)
     confidence = float(np.mean([
         _visibility(landmarks[index]) for index in confidence_indexes
@@ -337,6 +357,7 @@ def analyse_front_shoulder_frame(landmarks: Sequence[object], frame_width: int, 
         "view_width_to_torso_ratio": float(view_width_to_torso_ratio),
         "shoulder_width_to_torso_ratio": float(shoulder_width_to_torso_ratio),
         "hip_width_to_torso_ratio": float(hip_width_to_torso_ratio),
+        "centering_offset_ratio": float(centering_offset_ratio),
         "landmark_confidence": confidence,
         "left_shoulder_length_px": float(left_length_px),
         "right_shoulder_length_px": float(right_length_px),
@@ -349,6 +370,9 @@ def analyse_front_shoulder_frame(landmarks: Sequence[object], frame_width: int, 
             "left_shoulder": left_shoulder,
             "torso_midline_proxy": torso_midline_proxy,
             "right_shoulder": right_shoulder,
+            "nose": nose,
+            "ankle": ankle,
+            "hip": hip,
         },
     }
     metrics.update(classify_shoulder_balance(asymmetry_ratio, shoulder_span_px))

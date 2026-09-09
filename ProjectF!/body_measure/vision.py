@@ -132,6 +132,13 @@ class VisionEngine:
         )
 
     @staticmethod
+    def _mp_image(rgb_frame: np.ndarray) -> mp.Image:
+        return mp.Image(
+            image_format=mp.ImageFormat.SRGB,
+            data=rgb_frame,
+        )
+
+    @staticmethod
     def _empty_result() -> PoseFrameResult:
         return PoseFrameResult(pose_landmarks=[])
 
@@ -372,10 +379,12 @@ class VisionEngine:
         return HandFrameResult(hand_landmarks=merged[:2])
 
     def _detect_hands(self, frame: np.ndarray, pose_result: PoseFrameResult,
-                      timestamp_ms: int) -> HandFrameResult:
+                      timestamp_ms: int, rgb_frame: np.ndarray | None = None) -> HandFrameResult:
         """Detect nearby hands normally and distant hands in enlarged wrist crops."""
         height, width = frame.shape[:2]
-        full_raw = self.hand.detect_for_video(self._image(frame), timestamp_ms)
+        if rgb_frame is None:
+            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        full_raw = self.hand.detect_for_video(self._mp_image(rgb_frame), timestamp_ms)
         full_result = self._map_hand_result(full_raw, (0, 0, width, height), width, height)
 
         # Crop passes are rate-limited so the camera remains responsive.  The
@@ -399,7 +408,8 @@ class VisionEngine:
         """Return pose coordinates plus near/far hand landmarks in camera space."""
         timestamp_ms = self._next_timestamp(timestamp_ms)
         height, width = frame.shape[:2]
-        full_raw = self.pose.detect_for_video(self._image(frame), timestamp_ms)
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        full_raw = self.pose.detect_for_video(self._mp_image(rgb_frame), timestamp_ms)
         full_result = self._map_result(full_raw, (0, 0, width, height), width, height)
         selected_result = self._empty_result()
 
@@ -440,7 +450,7 @@ class VisionEngine:
                     self._remember_roi(recovered, width, height, timestamp_ms)
                     selected_result = recovered
 
-        return selected_result, self._detect_hands(frame, selected_result, timestamp_ms)
+        return selected_result, self._detect_hands(frame, selected_result, timestamp_ms, rgb_frame=rgb_frame)
 
     def close(self) -> None:
         self.pose.close()

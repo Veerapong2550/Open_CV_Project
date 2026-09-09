@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import filedialog, messagebox
 
 import cv2
 import numpy as np
 from PIL import Image, ImageTk
+
+from .export import save_measurement_to_excel
 
 
 BACKGROUND = "#101418"
@@ -98,9 +100,11 @@ def _distance_text(value: float | None) -> str | None:
     return f"ประมาณ {value:.1f} ซม." if value is not None else None
 
 
-def _unit_text(posture: dict) -> str:
+def _unit_text(posture: dict, calibration: str = "") -> str:
     if posture.get("torso_cm") is not None:
-        return "หน่วย: % ของลำตัว • องศา • เซนติเมตรจาก ArUco"
+        if "ArUco" in calibration:
+            return "หน่วย: % ของลำตัว • องศา • เซนติเมตร (ปรับเทียบ ArUco)"
+        return "หน่วย: % ของลำตัว • องศา • เซนติเมตร (ประมาณการจากส่วนสูง)"
     return "หน่วย: % ของลำตัว และองศา"
 
 
@@ -151,11 +155,9 @@ def _shoulder_length_text(shoulders: dict, *, cm_key: str, ratio_key: str) -> st
 
 def _build_front_shoulder_section(parent: tk.Misc, shoulders: dict | None) -> None:
     """Show left/right shoulder data last, separate from side-view posture data."""
-    _section_title(parent, "ภาพด้านหน้า: เปรียบเทียบระยะไหล่ซ้าย–ขวา")
     if not shoulders:
-        tk.Label(parent, text="ไม่มีข้อมูลไหล่ด้านหน้าจากการวัดครั้งนี้", font=("Tahoma", 10),
-                 fg=MUTED, bg=PANEL).pack(anchor=tk.W)
         return
+    _section_title(parent, "ภาพด้านหน้า: เปรียบเทียบระยะไหล่ซ้าย–ขวา")
 
     status_text, status_colour = _shoulder_status_style(str(shoulders.get("shoulder_balance_level", "")))
     card = tk.Frame(parent, bg=CARD, padx=14, pady=13)
@@ -205,7 +207,7 @@ def _build_front_shoulder_section(parent: tk.Misc, shoulders: dict | None) -> No
     tk.Label(card, text=f"คุณภาพภาพหน้า: {stable} • {frames} เฟรม • ความเชื่อมั่น {confidence:.2f}",
              font=("Tahoma", 8), fg="#8fa6b7", bg=CARD).pack(anchor=tk.W, pady=(8, 0))
     if shoulders.get("left_shoulder_length_cm") is None:
-        tk.Label(card, text="ยังไม่มีค่าเซนติเมตร — ใช้ ArUco ที่ระนาบไหล่เพื่อปรับเทียบ",
+        tk.Label(card, text="ยังไม่มีค่าเซนติเมตร — ใช้ ArUco หรือระบุส่วนสูงเพื่อปรับเทียบ",
                  font=("Tahoma", 8), fg="#8fa6b7", bg=CARD).pack(anchor=tk.W, pady=(2, 0))
     tk.Label(parent, text=("หมายเหตุ: เป็นระยะที่ฉายบนภาพเพื่อเปรียบเทียบสองข้าง "
                            "ไม่ใช่ความยาวกระดูกหรือการวินิจฉัย"),
@@ -245,7 +247,7 @@ def _build_posture_summary(panel: tk.Misc, measurement: dict, posture: dict) -> 
              bg="#1e2a34", wraplength=CONTENT_WRAP, justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 0))
 
     _section_title(panel, "ตัวชี้วัดหลัก")
-    tk.Label(panel, text=_unit_text(posture), font=("Tahoma", 9), fg=MUTED, bg=PANEL).pack(anchor=tk.W, pady=(0, 7))
+    tk.Label(panel, text=_unit_text(posture, str(measurement.get("calibration", ""))), font=("Tahoma", 9), fg=MUTED, bg=PANEL).pack(anchor=tk.W, pady=(0, 7))
     metrics = tk.Frame(panel, bg=PANEL)
     metrics.pack(fill=tk.X)
     for column in range(3):
@@ -404,10 +406,36 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
         else:
             _build_legacy_summary(panel, measurement)
 
-        close = tk.Button(panel, text="วัดอีกครั้ง", command=root.destroy, font=("Tahoma", 11, "bold"),
+        btn_bar = tk.Frame(panel, bg=PANEL)
+        btn_bar.pack(fill=tk.X, pady=(18, 0))
+
+        def on_export_excel():
+            try:
+                date_str = str(measurement.get("measured_at", "result")).replace(":", "").replace("-", "")
+                default_name = f"measurement_{date_str}.xlsx"
+                path = filedialog.asksaveasfilename(
+                    parent=root,
+                    title="บันทึกผลการวัดเป็นไฟล์ Excel",
+                    defaultextension=".xlsx",
+                    initialfile=default_name,
+                    filetypes=[("Excel Files", "*.xlsx"), ("All Files", "*.*")],
+                )
+                if path:
+                    saved_path = save_measurement_to_excel(measurement, path)
+                    messagebox.showinfo("บันทึกสำเร็จ", f"บันทึกไฟล์ Excel สำเร็จที่:\n{saved_path}", parent=root)
+            except Exception as exc:
+                messagebox.showerror("เกิดข้อผิดพลาด", f"ไม่สามารถบันทึกไฟล์ Excel ได้:\n{exc}", parent=root)
+
+        export_btn = tk.Button(btn_bar, text="📥 ส่งออกผลเป็น Excel (.xlsx)", command=on_export_excel,
+                               font=("Tahoma", 11, "bold"), bg="#107c41", fg="white",
+                               activebackground="#0b582e", activeforeground="white", relief=tk.FLAT,
+                               padx=20, pady=8, cursor="hand2")
+        export_btn.pack(side=tk.LEFT)
+
+        close = tk.Button(btn_bar, text="วัดอีกครั้ง", command=root.destroy, font=("Tahoma", 11, "bold"),
                           bg="#2c7be5", fg="white", activebackground="#1f64c0", relief=tk.FLAT,
                           padx=28, pady=8, cursor="hand2")
-        close.pack(anchor=tk.E, pady=(16, 0))
+        close.pack(side=tk.RIGHT)
         root.bind("<Escape>", lambda _event: root.destroy())
         root.protocol("WM_DELETE_WINDOW", root.destroy)
         if parent is None:
@@ -419,22 +447,28 @@ def show_measurement_summary(measurement: dict, parent: tk.Misc | None = None) -
             # The camera window may have been closed while this modal was
             # visible; lifting a destroyed Tk window would otherwise raise a
             # TclError and terminate the capture loop unexpectedly.
-            if parent.winfo_exists():
-                parent.lift()
+            try:
+                if parent.winfo_exists():
+                    parent.lift()
+            except tk.TclError:
+                pass
     except tk.TclError as error:
         # Do not let a window-manager focus/display problem discard a valid
         # measurement.  The numerical summary remains visible in a standard
         # dialog, and in the terminal when Tk is unavailable.
-        posture = measurement.get("posture", {})
+        posture = measurement.get("posture") or {}
         text = (
             "วัดเสร็จแล้ว แต่เปิดหน้าสรุปรายละเอียดไม่ได้\n\n"
             f"ผลคัดกรอง: {posture.get('screening_label', 'โปรดตรวจผลใหม่')}\n"
             f"ศีรษะเทียบไหล่: {posture.get('head_shoulder_offset_ratio', 0) * 100:.1f}%\n"
             f"ไหล่เทียบสะโพก: {posture.get('shoulder_hip_offset_ratio', 0) * 100:.1f}%\n"
-            f"ลำตัวเอียง: {posture.get('trunk_inclination_deg', 0):.1f}°\n\n"
+            f"ลำตัวเอียง: {posture.get('trunk_inclination_deg', 0):.1f} องศา\n\n"
             f"รายละเอียดหน้าต่าง: {error}"
         )
-        print(text)
+        try:
+            print(text)
+        except Exception:
+            pass
         try:
             messagebox.showinfo("ผลการวัด", text, parent=parent)
         except tk.TclError:
@@ -464,7 +498,13 @@ class MeasurementUI:
 
     @property
     def is_open(self) -> bool:
-        return self._open
+        if not self._open:
+            return False
+        try:
+            return bool(self.root.winfo_exists())
+        except tk.TclError:
+            self._open = False
+            return False
 
     def overlay_scale(self, frame: np.ndarray) -> float:
         """Scale camera-overlay text so it stays readable after preview resize."""
@@ -481,8 +521,19 @@ class MeasurementUI:
         if not self._open:
             return
         try:
-            image = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            image.thumbnail((max(self.root.winfo_width(), 1), max(self.root.winfo_height(), 1)))
+            target_w = self.root.winfo_width()
+            target_h = self.root.winfo_height()
+            if target_w < 100 or target_h < 100:
+                target_w, target_h = self._window_size
+
+            fh, fw = frame.shape[:2]
+            scale = min(target_w / fw, target_h / fh)
+            new_w = max(1, int(fw * scale))
+            new_h = max(1, int(fh * scale))
+
+            # Fast OpenCV resize on SIMD instead of slow PIL CPU thumbnail
+            resized = cv2.resize(frame, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+            image = Image.fromarray(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB))
             photo = ImageTk.PhotoImage(image=image)
             self.label.configure(image=photo)
             self.label.image = photo
